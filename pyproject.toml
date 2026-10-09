@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "sluice"
 version = "0.0.1"
 description = "Multi-agent equity research pipeline with per-item news scoring, learned weights and guarded self-improvement."
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
