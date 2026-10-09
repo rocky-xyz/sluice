@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+
+/docs
+tasks.md
+.DS_Store
+AGENTS.md
+CLAUDE.md
