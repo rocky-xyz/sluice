@@ -7,8 +7,8 @@ position sizes with code rather than with an LLM.
 This is a research and decision-support tool. It does not place orders, and
 nothing here is financial advice.
 
-> **Status: early.** The repository currently contains the news store and a
-> Yahoo Finance collector. The sections below describe the design being built;
+> **Status: early.** The repository currently contains the news store and
+> collectors for Yahoo Finance and Finnhub. The sections below describe the design being built;
 > the roadmap shows what exists.
 
 ## Why
@@ -35,7 +35,7 @@ The goal is rigour, not a claim of profitability.
 
 ```
 data (yfinance,        ->  news store: timestamp, source, ticker, text      [cached]
- Alpha Vantage)
+ Finnhub)
         |
 scoring                per-item scores: relevance, stance, novelty, rumour,
                        event type + code features (source, time of day,
@@ -101,15 +101,20 @@ pip install -e ".[dev]"
 sluice --version
 sluice news collect                      # fetch recent Yahoo Finance news for the universe
 sluice news collect --tickers NVDA,AMD   # or for chosen tickers
+sluice news backfill                     # archive a year of Finnhub company news (resumable)
 sluice news import                       # rebuild the store from the raw archive
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
-responses as JSONL. `news import` loads archived items into the store, so the
-database can always be rebuilt. Scheduled collection runs in a separate private
-data repository, cloned to `data/`; items collected by hand are archived under
-`data/local/` so they never conflict with it. Further subcommands will be added
-as each roadmap step lands.
+responses as JSONL. `news backfill` archives history from Finnhub, one ticker
+and one day per request, and resumes where it stopped. `news import` loads
+archived items from every source into the store, so the database can always be
+rebuilt. Scheduled collection runs in a separate private data repository,
+cloned to `data/`; items collected by hand are archived under `data/local/` so
+they never conflict with it.
+
+API keys are read from the environment or from a local `.env` file; see
+`.env.example`. Further subcommands will be added as each roadmap step lands.
 
 ## Development
 

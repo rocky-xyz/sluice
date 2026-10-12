@@ -1,13 +1,19 @@
-import json
 import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yfinance as yf
-from pydantic import BaseModel
 from yfinance.exceptions import YFRateLimitError
 
+from sluice.news.archive import (
+    ImportResult,
+    TickerResult,
+    append_records,
+    archive_files,
+    import_files,
+    read_records,
+)
 from sluice.news.models import NewsItem
 from sluice.news.store import NewsStore
 from sluice.news.timeutil import to_utc
@@ -18,22 +24,6 @@ RETRY_DELAYS = (2.0, 4.0, 8.0)  # seconds; rate limits only
 
 # yfinance turns some failed requests into an empty result; make them raise instead.
 yf.config.debug.hide_exceptions = False
-
-
-class TickerResult(BaseModel):
-    ticker: str
-    fetched: int = 0
-    inserted: int = 0
-    skipped: int = 0  # already stored
-    dropped: int = 0  # no title, or not tagged with any collected ticker
-    error: str | None = None
-
-
-class ImportResult(BaseModel):
-    records: int = 0
-    inserted: int = 0
-    skipped: int = 0
-    dropped: int = 0
 
 
 def _retry(call: Callable[[], list], sleep: Callable[[float], None] = time.sleep) -> list:
@@ -66,10 +56,6 @@ def fetch_raw(ticker: str, count: int = 50) -> list[dict]:
         if news:
             return news
     return []
-
-
-def _raw_id(raw: dict) -> str | None:
-    return raw.get("id") or raw.get("uuid")
 
 
 def _parse_time(raw: dict, content: dict | None) -> datetime | None:
@@ -128,26 +114,6 @@ def parse_item(
     )
 
 
-def _archive(raw_dir: Path, ticker: str, fetched_at: datetime, items: list[dict]) -> None:
-    """Append raw items to today's JSONL file, once per (ticker, item id) per day."""
-    path = raw_dir / SOURCE / f"{fetched_at:%Y-%m-%d}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    seen = set()
-    if path.exists():
-        with path.open() as lines:
-            for line in lines:
-                record = json.loads(line)
-                seen.add((record["ticker"], _raw_id(record["raw"])))
-    with path.open("a") as out:
-        for raw in items:
-            key = (ticker, _raw_id(raw))
-            if key[1] is not None and key in seen:
-                continue
-            seen.add(key)
-            record = {"fetched_at": fetched_at.isoformat(), "ticker": ticker, "raw": raw}
-            out.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def collect(
     tickers: Iterable[str],
     store: NewsStore,
@@ -174,7 +140,9 @@ def collect(
             continue
         fetched_at = now()
         if raw_dir is not None:
-            _archive(raw_dir, symbol, fetched_at, raw_items)
+            # Yahoo items are archived under the day they were fetched.
+            path = raw_dir / SOURCE / f"{fetched_at:%Y-%m-%d}.jsonl"
+            append_records(path, symbol, fetched_at, raw_items)
         items = [parse_item(raw, symbol, fetched_at, allowed) for raw in raw_items]
         kept = [item for item in items if item is not None]
         result.dropped = len(items) - len(kept)
@@ -183,44 +151,12 @@ def collect(
     return results
 
 
-def write_run_log(run_dir: Path, started_at: datetime, results: list[TickerResult]) -> Path:
-    """Append one line per run, so gaps can be found long after the CI logs are gone."""
-    path = run_dir / f"{started_at:%Y-%m-%d}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "started_at": started_at.isoformat(),
-        "source": SOURCE,
-        "results": [r.model_dump() for r in results],
-    }
-    with path.open("a") as out:
-        out.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return path
-
-
 def import_archive(raw_dir: Path, store: NewsStore) -> ImportResult:
     """Load the raw JSONL archive into the store. Safe to repeat.
 
     Items are linked to every ticker that was ever queried, so a ticker added
     to collection later also picks up older items that were tagged with it.
     """
-    files = sorted((raw_dir / SOURCE).glob("*.jsonl"))
-    allowed = set()
-    for path in files:
-        with path.open() as lines:
-            allowed.update(canonical(json.loads(line)["ticker"]) for line in lines)
-
-    result = ImportResult()
-    for path in files:
-        with path.open() as lines:
-            records = [json.loads(line) for line in lines]
-        items = [
-            parse_item(r["raw"], r["ticker"], datetime.fromisoformat(r["fetched_at"]), allowed)
-            for r in records
-        ]
-        kept = [item for item in items if item is not None]
-        added = store.add(kept)
-        result.records += len(records)
-        result.dropped += len(items) - len(kept)
-        result.inserted += added.inserted
-        result.skipped += added.skipped
-    return result
+    files = archive_files(raw_dir, SOURCE)
+    allowed = {canonical(record["ticker"]) for path in files for record in read_records(path)}
+    return import_files(files, lambda raw, t, at: parse_item(raw, t, at, allowed), store)

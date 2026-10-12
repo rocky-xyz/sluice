@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
@@ -25,7 +26,7 @@ def main(
         False, "--version", callback=_version, is_eager=True, help="Show the version and exit."
     ),
 ) -> None:
-    pass
+    load_dotenv()  # API keys live in a local .env; real environment variables win
 
 
 @news_app.command("collect")
@@ -44,14 +45,15 @@ def news_collect(
     """Fetch recent Yahoo Finance news and add it to the store."""
     from datetime import UTC, datetime
 
+    from sluice.news.archive import write_run_log
     from sluice.news.store import NewsStore
-    from sluice.news.yahoo import collect, write_run_log
+    from sluice.news.yahoo import SOURCE, collect
 
     started_at = datetime.now(UTC)
     with NewsStore(db) as store:
         results = collect([t for t in tickers.split(",") if t.strip()], store, raw_dir=raw_dir)
     if run_log is not None:
-        write_run_log(run_log, started_at, results)
+        write_run_log(run_log, started_at, SOURCE, results)
 
     table = Table("ticker", "fetched", "new", "known", "dropped", "error")
     for r in results:
@@ -71,15 +73,72 @@ def news_import(
     ] = None,
     db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
 ) -> None:
-    """Load archived raw items into the store. Safe to repeat."""
+    """Load archived raw items from every source into the store. Safe to repeat."""
+    from sluice.news import finnhub, yahoo
     from sluice.news.store import NewsStore
-    from sluice.news.yahoo import import_archive
 
     console = Console()
     with NewsStore(db) as store:
         for directory in raw_dir or [Path("data/raw"), Path("data/local/raw")]:
-            r = import_archive(directory, store)
-            console.print(
-                f"{directory}: {r.records} records, {r.inserted} new, "
-                f"{r.skipped} known, {r.dropped} dropped"
-            )
+            for module in (yahoo, finnhub):
+                r = module.import_archive(directory, store)
+                console.print(
+                    f"{directory / module.SOURCE}: {r.records} records, {r.inserted} new, "
+                    f"{r.skipped} known, {r.dropped} dropped"
+                )
+
+
+@news_app.command("backfill")
+def news_backfill(
+    start: Annotated[
+        str | None, typer.Option("--from", help="First day, YYYY-MM-DD. Default: one year ago.")
+    ] = None,
+    end: Annotated[
+        str | None, typer.Option("--to", help="Last day, YYYY-MM-DD. Default: yesterday (UTC).")
+    ] = None,
+    tickers: Annotated[
+        str, typer.Option("--tickers", help="Comma-separated tickers to backfill.")
+    ] = ",".join(UNIVERSE),
+    raw_dir: Annotated[
+        Path, typer.Option("--raw-dir", help="Where raw items are archived as JSONL.")
+    ] = Path("data/raw"),
+    progress: Annotated[
+        Path, typer.Option("--progress", help="Record of finished (ticker, day) pairs.")
+    ] = Path("data/backfill/finnhub.jsonl"),
+) -> None:
+    """Archive a year of Finnhub company news. Interrupt and rerun freely: it resumes."""
+    import os
+    from datetime import UTC, date, datetime, timedelta
+
+    from rich.progress import Progress
+
+    from sluice.news.finnhub import Client, backfill
+
+    token = os.environ.get("FINNHUB_API_KEY", "").strip()
+    if not token:
+        typer.echo("FINNHUB_API_KEY is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    today = datetime.now(UTC).date()
+    first = date.fromisoformat(start) if start else today - timedelta(days=365)
+    last = date.fromisoformat(end) if end else today - timedelta(days=1)
+
+    with Progress() as bar:
+        task = bar.add_task(f"{first} .. {last}", total=None)
+        result = backfill(
+            [t for t in tickers.split(",") if t.strip()],
+            first,
+            last,
+            Client(token).company_news,
+            raw_dir,
+            progress,
+            on_step=lambda done, total: bar.update(task, completed=done, total=total),
+        )
+    Console().print(
+        f"requested {result.requested}, already done {result.already_done}, "
+        f"items {result.items}, newly archived {result.archived}, "
+        f"capped days {result.capped}, failed {result.failed}"
+    )
+    if result.aborted:
+        typer.echo(f"Stopped: {result.aborted}. Rerun to continue.", err=True)
+    if result.aborted or result.failed:
+        raise typer.Exit(code=1)

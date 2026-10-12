@@ -5,16 +5,15 @@ import pytest
 import yfinance
 from yfinance.exceptions import YFRateLimitError
 
+from sluice.news.archive import TickerResult, write_run_log
 from sluice.news.store import NewsStore
 from sluice.news.yahoo import (
     RETRY_DELAYS,
-    TickerResult,
     _retry,
     collect,
     fetch_raw,
     import_archive,
     parse_item,
-    write_run_log,
 )
 
 FETCHED = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
@@ -235,8 +234,8 @@ def test_search_that_stays_empty_returns_nothing(monkeypatch):
 
 def test_run_log_appends_one_line_per_run(tmp_path):
     results = [TickerResult(ticker="NVDA", fetched=2, inserted=2), TickerResult(ticker="KO", error="x")]
-    path = write_run_log(tmp_path / "runs", FETCHED, results)
-    write_run_log(tmp_path / "runs", FETCHED, results)
+    path = write_run_log(tmp_path / "runs", FETCHED, "yfinance", results)
+    write_run_log(tmp_path / "runs", FETCHED, "yfinance", results)
 
     assert path == tmp_path / "runs" / "2026-10-13.jsonl"
     first, second = (json.loads(line) for line in path.read_text().splitlines())
