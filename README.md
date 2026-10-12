@@ -33,7 +33,6 @@ The goal is rigour, not a claim of profitability.
 
 ## Architecture
 
-![sluice architecture](assets/architecture.png)
 ```
 data (yfinance,        ->  news store: timestamp, source, ticker, text      [cached]
  Alpha Vantage)
