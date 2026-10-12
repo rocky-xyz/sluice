@@ -2,15 +2,14 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+import yfinance
 from yfinance.exceptions import YFRateLimitError
 
 from sluice.news.store import NewsStore
 from sluice.news.yahoo import (
-    EMPTY_RETRY_DELAY,
     RETRY_DELAYS,
     TickerResult,
     _retry,
-    _retry_empty,
     collect,
     fetch_raw,
     import_archive,
@@ -194,19 +193,44 @@ def test_other_errors_are_not_retried():
     assert slept == []
 
 
-def test_empty_answer_is_asked_once_more():
-    slept = []
-    answers = iter([[], ["ok"]])
-    assert _retry_empty(lambda: next(answers), sleep=slept.append) == ["ok"]
-    assert slept == [EMPTY_RETRY_DELAY]
+class _Feed:
+    def __init__(self, items: list):
+        self.items = items
+
+    def get_news(self, count: int) -> list:
+        return self.items
 
 
-def test_empty_answer_twice_stays_empty_and_a_full_one_is_not_repeated():
-    slept = []
-    answers = iter([[], [], ["never asked"]])
-    assert _retry_empty(lambda: next(answers), sleep=slept.append) == []
-    assert _retry_empty(lambda: ["ok"], sleep=slept.append) == ["ok"]
-    assert slept == [EMPTY_RETRY_DELAY]
+def _patch_yahoo(monkeypatch, feed: list, search: dict) -> list:
+    """Fake Yahoo: `search` maps (news_count, max_results) to the news it answers with."""
+    asked = []
+
+    class Search:
+        def __init__(self, query: str, news_count: int, max_results: int):
+            asked.append((news_count, max_results))
+            self.news = search.get((news_count, max_results), [])
+
+    monkeypatch.setattr(yfinance, "Ticker", lambda ticker: _Feed(feed))
+    monkeypatch.setattr(yfinance, "Search", Search)
+    return asked
+
+
+def test_feed_is_used_when_it_answers(monkeypatch):
+    asked = _patch_yahoo(monkeypatch, feed=["feed item"], search={(50, 0): ["search item"]})
+    assert fetch_raw("NVDA") == ["feed item"]
+    assert asked == []
+
+
+def test_empty_search_is_asked_again_in_a_different_shape(monkeypatch):
+    asked = _patch_yahoo(monkeypatch, feed=[], search={(40, 0): ["found"]})
+    assert fetch_raw("NVDA") == ["found"]
+    assert asked == [(50, 0), (50, 1), (40, 0)]
+
+
+def test_search_that_stays_empty_returns_nothing(monkeypatch):
+    asked = _patch_yahoo(monkeypatch, feed=[], search={})
+    assert fetch_raw("NVDA") == []
+    assert asked == [(50, 0), (50, 1), (40, 0), (25, 0)]
 
 
 def test_run_log_appends_one_line_per_run(tmp_path):

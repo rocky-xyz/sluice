@@ -15,7 +15,6 @@ from sluice.universe import canonical
 
 SOURCE = "yfinance"
 RETRY_DELAYS = (2.0, 4.0, 8.0)  # seconds; rate limits only
-EMPTY_RETRY_DELAY = 5.0  # seconds; Yahoo sometimes answers with nothing, then recovers
 
 # yfinance turns some failed requests into an empty result; make them raise instead.
 yf.config.debug.hide_exceptions = False
@@ -46,25 +45,27 @@ def _retry(call: Callable[[], list], sleep: Callable[[float], None] = time.sleep
     return call()
 
 
-def _retry_empty(call: Callable[[], list], sleep: Callable[[float], None] = time.sleep) -> list:
-    """Ask once more when the answer is empty."""
-    items = call()
-    if not items:
-        sleep(EMPTY_RETRY_DELAY)
-        items = call()
-    return items
+def _search_variants(count: int) -> list[tuple[int, int]]:
+    """(news_count, max_results) pairs to try in turn.
 
-
-def _fetch_once(ticker: str, count: int) -> list[dict]:
-    feed = _retry(lambda: yf.Ticker(ticker).get_news(count=count))
-    if feed:
-        return feed
-    return _retry(lambda: yf.Search(ticker, news_count=count, max_results=0).news) or []
+    Yahoo search sometimes answers one exact query with no news for minutes on
+    end, while a slightly different query for the same ticker works at once.
+    """
+    return [(count, 0), (count, 1), (count * 4 // 5, 0), (count // 2, 0)]
 
 
 def fetch_raw(ticker: str, count: int = 50) -> list[dict]:
     """Raw news items for one ticker: the quote feed, or Yahoo search when the feed is empty."""
-    return _retry_empty(lambda: _fetch_once(ticker, count))
+    feed = _retry(lambda: yf.Ticker(ticker).get_news(count=count))
+    if feed:
+        return feed
+    for news_count, max_results in _search_variants(count):
+        news = _retry(
+            lambda n=news_count, m=max_results: yf.Search(ticker, news_count=n, max_results=m).news
+        )
+        if news:
+            return news
+    return []
 
 
 def _raw_id(raw: dict) -> str | None:
