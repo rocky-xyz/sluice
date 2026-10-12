@@ -40,6 +40,27 @@ def item(n: int = 1, **overrides) -> dict:
     return raw
 
 
+@pytest.mark.parametrize(
+    ("stamp", "actual"),
+    [
+        # 2025-10-17 05:30 "UTC" is really 05:30 EDT; 2025-12-08 05:30 is really 05:30 EST
+        (datetime(2025, 10, 17, 5, 30, tzinfo=UTC), datetime(2025, 10, 17, 9, 30, tzinfo=UTC)),
+        (datetime(2025, 12, 8, 5, 30, tzinfo=UTC), datetime(2025, 12, 8, 10, 30, tzinfo=UTC)),
+    ],
+)
+@pytest.mark.parametrize("source", ["DowJones", "MarketWatch"])
+def test_eastern_stamped_sources_are_moved_to_real_utc(source, stamp, actual):
+    raw = item(source=source, datetime=int(stamp.timestamp()))
+    assert parse_item(raw, "NVDA", FETCHED).published_at == actual
+    assert parse_item(item(datetime=raw["datetime"]), "NVDA", FETCHED).published_at == stamp
+
+
+def test_archive_file_name_ignores_the_time_zone_fix(tmp_path):
+    late = int(datetime(2025, 10, 17, 22, 0, tzinfo=UTC).timestamp())  # 02:00 next day after the fix
+    archive(tmp_path, "NVDA", FETCHED, [item(source="DowJones", datetime=late)])
+    assert [p.name for p in (tmp_path / "finnhub").iterdir()] == ["2025-10-17.jsonl"]
+
+
 class Response:
     def __init__(self, status_code: int = 200, body: object = None):
         self.status_code = status_code

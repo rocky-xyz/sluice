@@ -17,6 +17,7 @@ from sluice.news.archive import (
 )
 from sluice.news.models import NewsItem
 from sluice.news.store import NewsStore
+from sluice.news.timeutil import ET
 from sluice.universe import canonical
 
 SOURCE = "finnhub"
@@ -27,6 +28,9 @@ RATE_LIMIT_WAITS = (30.0, 60.0, 60.0)  # seconds; HTTP 429 only
 # above this count may have lost its earliest items.
 CAP = 240
 MAX_CONSECUTIVE_FAILURES = 5
+# Measured on 2026-10-13: the same headline from these sources is stamped exactly
+# 4 h (EDT) or 5 h (EST) before its Yahoo copy, whose time matches Yahoo's own feed.
+EASTERN_STAMPED_SOURCES = frozenset({"MarketWatch", "DowJones"})
 
 Fetch = Callable[[str, date], list[dict]]
 
@@ -77,11 +81,24 @@ class Client:
         return body
 
 
-def _published_at(raw: dict) -> datetime | None:
+def _stamped_at(raw: dict) -> datetime | None:
+    """The timestamp exactly as Finnhub gives it."""
     try:
         return datetime.fromtimestamp(raw["datetime"], UTC) if raw["datetime"] else None
     except (KeyError, TypeError, ValueError, OSError, OverflowError):
         return None
+
+
+def _published_at(raw: dict) -> datetime | None:
+    """Publish time in UTC, with Finnhub's time zone error for some sources undone.
+
+    For these sources Finnhub stores the US Eastern wall-clock time as if it
+    were UTC, which dates an article four or five hours before it came out.
+    """
+    stamped = _stamped_at(raw)
+    if stamped is not None and raw.get("source") in EASTERN_STAMPED_SOURCES:
+        return stamped.replace(tzinfo=ET).astimezone(UTC)
+    return stamped
 
 
 def parse_item(raw: dict, ticker: str, fetched_at: datetime) -> NewsItem | None:
@@ -111,7 +128,7 @@ def archive(raw_dir: Path, ticker: str, fetched_at: datetime, items: Iterable[di
     """Archive raw items by publish date, so a year of backfill is spread over a year of files."""
     by_day: dict[str, list[dict]] = defaultdict(list)
     for raw in items:
-        published_at = _published_at(raw)
+        published_at = _stamped_at(raw)  # file names must not move when the fix changes
         by_day[f"{published_at:%Y-%m-%d}" if published_at else "undated"].append(raw)
     return sum(
         append_records(raw_dir / SOURCE / f"{name}.jsonl", ticker, fetched_at, day_items)
