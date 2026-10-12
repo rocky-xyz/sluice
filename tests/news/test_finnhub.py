@@ -48,11 +48,16 @@ def item(n: int = 1, **overrides) -> dict:
         (datetime(2025, 12, 8, 5, 30, tzinfo=UTC), datetime(2025, 12, 8, 10, 30, tzinfo=UTC)),
     ],
 )
-@pytest.mark.parametrize("source", ["DowJones", "MarketWatch"])
+@pytest.mark.parametrize("source", ["Benzinga", "CNBC", "DowJones", "MarketWatch", "SeekingAlpha"])
 def test_eastern_stamped_sources_are_moved_to_real_utc(source, stamp, actual):
     raw = item(source=source, datetime=int(stamp.timestamp()))
     assert parse_item(raw, "NVDA", FETCHED).published_at == actual
-    assert parse_item(item(datetime=raw["datetime"]), "NVDA", FETCHED).published_at == stamp
+
+
+@pytest.mark.parametrize("source", ["Yahoo", "ChartMill", "Finnhub", "Fintel", None])
+def test_other_sources_keep_their_utc_stamp(source):
+    parsed = parse_item(item(source=source, datetime=1768173623), "NVDA", FETCHED)
+    assert parsed.published_at == JAN_11
 
 
 def test_archive_file_name_ignores_the_time_zone_fix(tmp_path):

@@ -28,9 +28,16 @@ RATE_LIMIT_WAITS = (30.0, 60.0, 60.0)  # seconds; HTTP 429 only
 # above this count may have lost its earliest items.
 CAP = 240
 MAX_CONSECUTIVE_FAILURES = 5
-# Measured on 2026-10-13: the same headline from these sources is stamped exactly
-# 4 h (EDT) or 5 h (EST) before its Yahoo copy, whose time matches Yahoo's own feed.
-EASTERN_STAMPED_SOURCES = frozenset({"MarketWatch", "DowJones"})
+# Sources whose timestamps are US Eastern wall-clock time stored as if it were UTC.
+# Measured on a year of data (2026-10-13). MarketWatch and DowJones: the same
+# headline is stamped exactly 4 h (EDT) or 5 h (EST) before its Yahoo copy. Benzinga,
+# SeekingAlpha and CNBC: fixed columns land at the right hour only when read as
+# Eastern ("Wall Street Breakfast" at 06-07, "moves midday" at 12, after-market
+# recaps after 16:00) and keep the same stamped hour in winter and summer.
+# Yahoo and ChartMill are true UTC. Finnhub and Fintel are too few to tell.
+EASTERN_STAMPED_SOURCES = frozenset(
+    {"Benzinga", "CNBC", "DowJones", "MarketWatch", "SeekingAlpha"}
+)
 
 Fetch = Callable[[str, date], list[dict]]
 
