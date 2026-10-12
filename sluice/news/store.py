@@ -1,7 +1,7 @@
 import hashlib
 import sqlite3
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Self
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -9,7 +9,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from sluice.news.models import AddResult, NewsItem, StoredNews
 from sluice.news.timeutil import format_utc, parse_utc
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Same normalized title within this long of the first copy counts as a reprint.
+# Measured on Finnhub data: real reprints fall within hours, while identically
+# titled daily columns come 24 h apart.
+REPRINT_WINDOW = timedelta(hours=12)
 
 # No migrations: the database can always be rebuilt from the raw JSONL archive.
 _SCHEMA = """
@@ -24,6 +29,7 @@ CREATE TABLE IF NOT EXISTS articles (
     published_at   TEXT,
     time_precision TEXT NOT NULL CHECK (time_precision IN ('exact', 'day', 'missing')),
     fetched_at     TEXT NOT NULL,
+    cluster_id     INTEGER,  -- id of the earliest article of its reprint cluster; own id if alone
     CHECK ((published_at IS NULL) = (time_precision = 'missing'))
 );
 CREATE TABLE IF NOT EXISTS article_tickers (
@@ -33,6 +39,7 @@ CREATE TABLE IF NOT EXISTS article_tickers (
 );
 CREATE INDEX IF NOT EXISTS idx_article_tickers_ticker ON article_tickers(ticker);
 CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at);
+CREATE INDEX IF NOT EXISTS idx_articles_cluster_id ON articles(cluster_id);
 """
 
 
@@ -115,18 +122,51 @@ class NewsStore:
                         format_utc(item.fetched_at),
                     ),
                 )
-                if cursor.rowcount:
-                    result.inserted += 1
-                else:
-                    result.skipped += 1
                 article_id = self._conn.execute(
                     "SELECT id FROM articles WHERE url_norm = ?", (key,)
                 ).fetchone()[0]
+                if cursor.rowcount:
+                    result.inserted += 1
+                    # Alone until `rebuild_clusters` says otherwise.
+                    self._conn.execute(
+                        "UPDATE articles SET cluster_id = id WHERE id = ?", (article_id,)
+                    )
+                else:
+                    result.skipped += 1
                 self._conn.executemany(
                     "INSERT OR IGNORE INTO article_tickers (article_id, ticker) VALUES (?, ?)",
                     [(article_id, ticker) for ticker in item.tickers],
                 )
         return result
+
+    def rebuild_clusters(self, window: timedelta = REPRINT_WINDOW) -> int:
+        """Group reprints: same normalized title, published within `window` of the first copy.
+
+        Everything is recomputed, so the result does not depend on the order in
+        which articles arrived. Call it after adding articles. Returns the number
+        of articles that are reprints of an earlier one.
+        """
+        rows = self._conn.execute(
+            "SELECT id, title, published_at FROM articles"
+            " WHERE published_at IS NOT NULL ORDER BY published_at, id"
+        ).fetchall()
+        anchors: dict[str, tuple[int, datetime]] = {}
+        assignments = []
+        reprints = 0
+        for row in rows:
+            key = normalize_title(row["title"])
+            published = parse_utc(row["published_at"])
+            anchor = anchors.get(key)
+            if key and anchor is not None and published - anchor[1] <= window:
+                assignments.append((anchor[0], row["id"]))
+                reprints += 1
+            else:
+                anchors[key] = (row["id"], published)
+                assignments.append((row["id"], row["id"]))
+        with self._conn:
+            self._conn.execute("UPDATE articles SET cluster_id = id WHERE published_at IS NULL")
+            self._conn.executemany("UPDATE articles SET cluster_id = ? WHERE id = ?", assignments)
+        return reprints
 
     def query(
         self,
@@ -135,29 +175,55 @@ class NewsStore:
         since: datetime | None = None,
         include_invalid: bool = False,
         limit: int | None = None,
+        dedup: bool = True,
     ) -> list[StoredNews]:
         """Articles for `ticker` published strictly before `before`, newest first.
 
         `since` is an inclusive lower bound. Items without a publish time are
         returned only with `include_invalid`, and then regardless of the window.
+
+        With `dedup`, a story and its reprints come back once, as the earliest
+        copy. Only copies published before `before` are counted and contribute
+        tickers, so nothing here depends on what was published later.
+        `reprint_count` is the largest number of copies any single data vendor
+        carried, minus one: the same article collected from two vendors is not
+        a reprint.
         """
-        window = "a.published_at < ?"
-        params: list[object] = [ticker.strip().upper(), format_utc(before)]
+        params: dict[str, object] = {
+            "ticker": ticker.strip().upper(),
+            "before": format_utc(before),
+        }
+        window = "a.published_at < :before"
         if since is not None:
-            window += " AND a.published_at >= ?"
-            params.append(format_utc(since))
+            window += " AND a.published_at >= :since"
+            params["since"] = format_utc(since)
         if include_invalid:
             window = f"({window}) OR a.time_precision = 'missing'"
-        sql = (
-            "SELECT a.*, (SELECT group_concat(ticker) FROM article_tickers"
-            " WHERE article_id = a.id) AS tickers"
-            " FROM articles a JOIN article_tickers t ON t.article_id = a.id"
-            f" WHERE t.ticker = ? AND ({window})"
-            " ORDER BY a.published_at DESC, a.id DESC"
-        )
+        if dedup:
+            visible = "m.cluster_id = a.id AND (m.id = a.id OR m.published_at < :before)"
+            sql = (
+                "SELECT a.*,"
+                " (SELECT group_concat(DISTINCT t.ticker) FROM articles m"
+                f"  JOIN article_tickers t ON t.article_id = m.id WHERE {visible}) AS tickers,"
+                " (SELECT max(copies) FROM (SELECT count(*) AS copies FROM articles m"
+                f"  WHERE {visible} GROUP BY m.source)) - 1 AS reprint_count"
+                " FROM articles a"
+                f" WHERE a.cluster_id = a.id AND ({window})"
+                " AND EXISTS (SELECT 1 FROM articles m"
+                "  JOIN article_tickers t ON t.article_id = m.id"
+                f"  WHERE {visible} AND t.ticker = :ticker)"
+            )
+        else:
+            sql = (
+                "SELECT a.*, 0 AS reprint_count, (SELECT group_concat(ticker)"
+                " FROM article_tickers WHERE article_id = a.id) AS tickers"
+                " FROM articles a JOIN article_tickers t ON t.article_id = a.id"
+                f" WHERE t.ticker = :ticker AND ({window})"
+            )
+        sql += " ORDER BY a.published_at DESC, a.id DESC"
         if limit is not None:
-            sql += " LIMIT ?"
-            params.append(limit)
+            sql += " LIMIT :limit"
+            params["limit"] = limit
         return [_to_stored(row) for row in self._conn.execute(sql, params)]
 
 
@@ -173,4 +239,5 @@ def _to_stored(row: sqlite3.Row) -> StoredNews:
         time_precision=row["time_precision"],
         fetched_at=parse_utc(row["fetched_at"]),
         tickers=sorted(row["tickers"].split(",")),
+        reprint_count=row["reprint_count"],
     )

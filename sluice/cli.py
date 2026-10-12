@@ -90,6 +90,7 @@ def news_collect(
                     str(r.dropped),
                     r.error or "",
                 )
+        store.rebuild_clusters()
     Console().print(table)
     if failed:
         raise typer.Exit(code=1)
@@ -116,6 +117,7 @@ def news_import(
                     f"{directory / module.SOURCE}: {r.records} records, {r.inserted} new, "
                     f"{r.skipped} known, {r.dropped} dropped"
                 )
+        console.print(f"{store.rebuild_clusters()} articles are reprints of an earlier one")
 
 
 @news_app.command("backfill")

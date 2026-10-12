@@ -110,7 +110,9 @@ sluice news import                       # rebuild the store from the raw archiv
 responses as JSONL. `news backfill` archives history from Finnhub, one ticker
 and one day per request, and resumes where it stopped. `news import` loads
 archived items from every source into the store, so the database can always be
-rebuilt. Scheduled collection runs in a separate private data repository,
+rebuilt. Reprints (same headline within 12 hours) are grouped: a query returns
+each story once, with a reprint count as of the decision time. Scheduled
+collection runs in a separate private data repository,
 cloned to `data/`; items collected by hand are archived under `data/local/` so
 they never conflict with it.
 

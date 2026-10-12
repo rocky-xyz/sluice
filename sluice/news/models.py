@@ -46,6 +46,7 @@ class StoredNews(BaseModel):
     time_precision: TimePrecision
     fetched_at: AwareDatetime
     tickers: list[str]
+    reprint_count: int = 0  # reprints published before the query's decision time
 
 
 class AddResult(BaseModel):
