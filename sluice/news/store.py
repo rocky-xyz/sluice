@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Self
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from sluice.market_calendar import session_of
 from sluice.news.models import AddResult, NewsItem, StoredNews
 from sluice.news.timeutil import format_utc, parse_utc
 
-SCHEMA_VERSION = 2
+# Also bumped when stored values change meaning, so that a stale database is rebuilt.
+SCHEMA_VERSION = 3
 
 # Same normalized title within this long of the first copy counts as a reprint.
 # Measured on Finnhub data: real reprints fall within hours, while identically
@@ -187,7 +189,8 @@ class NewsStore:
         tickers, so nothing here depends on what was published later.
         `reprint_count` is the largest number of copies any single data vendor
         carried, minus one: the same article collected from two vendors is not
-        a reprint.
+        a reprint. When the earliest copy names no publisher, the publisher of
+        another visible copy is used.
         """
         params: dict[str, object] = {
             "ticker": ticker.strip().upper(),
@@ -203,6 +206,9 @@ class NewsStore:
             visible = "m.cluster_id = a.id AND (m.id = a.id OR m.published_at < :before)"
             sql = (
                 "SELECT a.*,"
+                " COALESCE(a.publisher, (SELECT m.publisher FROM articles m"
+                f"  WHERE {visible} AND m.publisher IS NOT NULL"
+                "  ORDER BY m.published_at, m.id LIMIT 1)) AS known_publisher,"
                 " (SELECT group_concat(DISTINCT t.ticker) FROM articles m"
                 f"  JOIN article_tickers t ON t.article_id = m.id WHERE {visible}) AS tickers,"
                 " (SELECT max(copies) FROM (SELECT count(*) AS copies FROM articles m"
@@ -215,7 +221,8 @@ class NewsStore:
             )
         else:
             sql = (
-                "SELECT a.*, 0 AS reprint_count, (SELECT group_concat(ticker)"
+                "SELECT a.*, a.publisher AS known_publisher, 0 AS reprint_count,"
+                " (SELECT group_concat(ticker)"
                 " FROM article_tickers WHERE article_id = a.id) AS tickers"
                 " FROM articles a JOIN article_tickers t ON t.article_id = a.id"
                 f" WHERE t.ticker = :ticker AND ({window})"
@@ -228,16 +235,18 @@ class NewsStore:
 
 
 def _to_stored(row: sqlite3.Row) -> StoredNews:
+    published_at = parse_utc(row["published_at"]) if row["published_at"] else None
     return StoredNews(
         id=row["id"],
         url=row["url"],
         title=row["title"],
         summary=row["summary"],
-        publisher=row["publisher"],
+        publisher=row["known_publisher"],
         source=row["source"],
-        published_at=parse_utc(row["published_at"]) if row["published_at"] else None,
+        published_at=published_at,
         time_precision=row["time_precision"],
         fetched_at=parse_utc(row["fetched_at"]),
         tickers=sorted(row["tickers"].split(",")),
         reprint_count=row["reprint_count"],
+        session=session_of(published_at) if row["time_precision"] == "exact" else None,
     )

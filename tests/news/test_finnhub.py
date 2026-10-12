@@ -108,7 +108,8 @@ def test_item_is_parsed_and_linked_to_the_queried_ticker():
     assert parsed.published_at == JAN_11
     assert parsed.time_precision == "exact"
     assert parsed.source == "finnhub"
-    assert parsed.publisher == "Yahoo"
+    assert parsed.publisher is None  # Yahoo is an aggregator, not a publisher
+    assert parse_item(item(source="Benzinga"), "NVDA", FETCHED).publisher == "Benzinga"
     assert parsed.summary.startswith("X is developing")
     assert parsed.url.startswith("https://finnhub.io/api/news?id=")
 

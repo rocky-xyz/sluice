@@ -128,3 +128,43 @@ def test_dedup_can_be_turned_off(store):
 def test_new_articles_are_visible_before_clusters_are_rebuilt(store):
     store.add([story(0), story(2)])
     assert len(store.query("NVDA", before=LATER)) == 2
+
+
+def test_stories_carry_their_trading_session(store):
+    # T0 is Monday 2026-03-02 09:00 UTC, which is 04:00 in New York.
+    load(
+        store,
+        story(0, title="pre"),
+        story(6, title="regular"),
+        story(13, title="post"),
+        story(20, title="closed"),
+        story(title="day only", time_precision="day"),
+    )
+    rows = store.query("NVDA", before=LATER)
+    sessions = {r.title: r.session for r in rows}
+    assert sessions == {
+        "pre": "pre",
+        "regular": "regular",
+        "post": "post",
+        "closed": "closed",
+        "day only": None,
+    }
+
+
+def test_missing_publisher_is_filled_from_a_copy_published_before_the_decision_time(store):
+    load(store, story(0, source="finnhub", publisher=None), story(2, publisher="Motley Fool"))
+
+    (early,) = store.query("NVDA", before=T0 + timedelta(hours=1))
+    assert early.publisher is None
+    (late,) = store.query("NVDA", before=LATER)
+    assert (late.source, late.publisher) == ("finnhub", "Motley Fool")
+
+
+def test_a_known_publisher_is_never_replaced(store):
+    load(store, story(0), story(2, publisher="Yahoo Finance"))
+    (row,) = store.query("NVDA", before=LATER)
+    assert row.publisher == "Reuters"
+    assert {r.publisher for r in store.query("NVDA", before=LATER, dedup=False)} == {
+        "Reuters",
+        "Yahoo Finance",
+    }

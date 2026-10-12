@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 TimePrecision = Literal["exact", "day", "missing"]
+Session = Literal["pre", "regular", "post", "closed"]
 
 
 class NewsItem(BaseModel):
@@ -47,6 +48,7 @@ class StoredNews(BaseModel):
     fetched_at: AwareDatetime
     tickers: list[str]
     reprint_count: int = 0  # reprints published before the query's decision time
+    session: Session | None = None  # part of the trading day; None without an exact time
 
 
 class AddResult(BaseModel):

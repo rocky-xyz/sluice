@@ -28,6 +28,9 @@ RATE_LIMIT_WAITS = (30.0, 60.0, 60.0)  # seconds; HTTP 429 only
 # above this count may have lost its earliest items.
 CAP = 240
 MAX_CONSECUTIVE_FAILURES = 5
+# "Yahoo" is where Finnhub found the article, not who published it: Yahoo carries
+# dozens of outlets. Storing it would lump them into one publisher.
+AGGREGATORS = frozenset({"Yahoo"})
 # Sources whose timestamps are US Eastern wall-clock time stored as if it were UTC.
 # Measured on a year of data (2026-10-13). MarketWatch and DowJones: the same
 # headline is stamped exactly 4 h (EDT) or 5 h (EST) before its Yahoo copy. Benzinga,
@@ -111,8 +114,8 @@ def _published_at(raw: dict) -> datetime | None:
 def parse_item(raw: dict, ticker: str, fetched_at: datetime) -> NewsItem | None:
     """Turn one raw item into a NewsItem, or None when it has no headline.
 
-    Finnhub's "source" is an aggregator (Yahoo, Benzinga, ...), not always the
-    original publisher, and "url" is a Finnhub redirect to the article.
+    Finnhub's "source" is the publisher, except for aggregators, which leave the
+    publisher unknown. "url" is a Finnhub redirect to the article.
     """
     title = (raw.get("headline") or "").strip()
     if not title:
@@ -122,7 +125,7 @@ def parse_item(raw: dict, ticker: str, fetched_at: datetime) -> NewsItem | None:
         title=title,
         url=raw.get("url") or None,
         summary=raw.get("summary") or None,
-        publisher=raw.get("source") or None,
+        publisher=None if raw.get("source") in AGGREGATORS else raw.get("source") or None,
         source=SOURCE,
         tickers=[canonical(ticker)],
         published_at=published_at,
