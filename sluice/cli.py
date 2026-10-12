@@ -34,6 +34,9 @@ def news_collect(
     tickers: Annotated[
         str, typer.Option("--tickers", help="Comma-separated tickers to collect.")
     ] = ",".join(UNIVERSE),
+    source: Annotated[
+        str, typer.Option("--source", help="yahoo, finnhub or all. finnhub needs FINNHUB_API_KEY.")
+    ] = "yahoo",
     db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
     raw_dir: Annotated[
         Path, typer.Option("--raw-dir", help="Where raw items are archived as JSONL.")
@@ -42,26 +45,53 @@ def news_collect(
         Path | None, typer.Option("--run-log", help="Directory for per-run result records.")
     ] = None,
 ) -> None:
-    """Fetch recent Yahoo Finance news and add it to the store."""
+    """Fetch recent news and add it to the store."""
+    import os
     from datetime import UTC, datetime
 
+    from sluice.news import finnhub, yahoo
     from sluice.news.archive import write_run_log
     from sluice.news.store import NewsStore
-    from sluice.news.yahoo import SOURCE, collect
 
-    started_at = datetime.now(UTC)
+    if source not in ("yahoo", "finnhub", "all"):
+        raise typer.BadParameter("choose yahoo, finnhub or all", param_hint="--source")
+    symbols = [t for t in tickers.split(",") if t.strip()]
+    token = os.environ.get("FINNHUB_API_KEY", "").strip()
+    failed = False
+    table = Table("source", "ticker", "fetched", "new", "known", "dropped", "error")
+
     with NewsStore(db) as store:
-        results = collect([t for t in tickers.split(",") if t.strip()], store, raw_dir=raw_dir)
-    if run_log is not None:
-        write_run_log(run_log, started_at, SOURCE, results)
-
-    table = Table("ticker", "fetched", "new", "known", "dropped", "error")
-    for r in results:
-        table.add_row(
-            r.ticker, str(r.fetched), str(r.inserted), str(r.skipped), str(r.dropped), r.error or ""
-        )
+        runs = []
+        if source in ("yahoo", "all"):
+            runs.append((yahoo.SOURCE, lambda: yahoo.collect(symbols, store, raw_dir=raw_dir)))
+        if source in ("finnhub", "all"):
+            if token:
+                fetch = finnhub.Client(token).company_news
+                runs.append(
+                    (finnhub.SOURCE, lambda: finnhub.collect(symbols, store, fetch, raw_dir))
+                )
+            else:
+                # Yahoo still runs: a missing key must not cost the data that needs none.
+                typer.echo("FINNHUB_API_KEY is not set; Finnhub was not collected.", err=True)
+                failed = True
+        for name, run in runs:
+            started_at = datetime.now(UTC)
+            results = run()
+            if run_log is not None:
+                write_run_log(run_log, started_at, name, results)
+            for r in results:
+                failed = failed or r.error is not None
+                table.add_row(
+                    name,
+                    r.ticker,
+                    str(r.fetched),
+                    str(r.inserted),
+                    str(r.skipped),
+                    str(r.dropped),
+                    r.error or "",
+                )
     Console().print(table)
-    if any(r.error for r in results):
+    if failed:
         raise typer.Exit(code=1)
 
 

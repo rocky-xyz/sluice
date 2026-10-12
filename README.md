@@ -101,6 +101,7 @@ pip install -e ".[dev]"
 sluice --version
 sluice news collect                      # fetch recent Yahoo Finance news for the universe
 sluice news collect --tickers NVDA,AMD   # or for chosen tickers
+sluice news collect --source all         # Yahoo Finance and Finnhub (needs FINNHUB_API_KEY)
 sluice news backfill                     # archive a year of Finnhub company news (resumable)
 sluice news import                       # rebuild the store from the raw archive
 ```

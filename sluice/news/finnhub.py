@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from sluice.news.archive import (
     ImportResult,
+    TickerResult,
     append_records,
     archive_files,
     import_files,
@@ -120,6 +121,44 @@ def archive(raw_dir: Path, ticker: str, fetched_at: datetime, items: Iterable[di
 
 def import_archive(raw_dir: Path, store: NewsStore) -> ImportResult:
     return import_files(archive_files(raw_dir, SOURCE), parse_item, store)
+
+
+def collect(
+    tickers: Iterable[str],
+    store: NewsStore,
+    fetch: Fetch,
+    raw_dir: Path | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> list[TickerResult]:
+    """Fetch, archive and store today's and yesterday's news (UTC) for each ticker.
+
+    Yesterday is asked again so that nothing published between two runs around
+    midnight is missed. An empty answer is not an error here: a quiet ticker can
+    have a day without news, and Finnhub reports its failures as HTTP errors.
+    """
+    results = []
+    for symbol in dict.fromkeys(canonical(t) for t in tickers):
+        result = TickerResult(ticker=symbol)
+        results.append(result)
+        fetched_at = now()
+        try:
+            raw_items = [
+                raw
+                for day in (fetched_at.date() - timedelta(days=1), fetched_at.date())
+                for raw in fetch(symbol, day)
+            ]
+        except (FinnhubError, requests.RequestException) as exc:
+            result.error = f"{type(exc).__name__}: {exc}".rstrip(": ")
+            continue
+        result.fetched = len(raw_items)
+        if raw_dir is not None:
+            archive(raw_dir, symbol, fetched_at, raw_items)
+        items = [parse_item(raw, symbol, fetched_at) for raw in raw_items]
+        kept = [item for item in items if item is not None]
+        result.dropped = len(items) - len(kept)
+        added = store.add(kept)
+        result.inserted, result.skipped = added.inserted, added.skipped
+    return results
 
 
 class BackfillResult(BaseModel):

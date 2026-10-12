@@ -13,6 +13,7 @@ from sluice.news.finnhub import (
     FinnhubError,
     archive,
     backfill,
+    collect,
     import_archive,
     parse_item,
 )
@@ -244,3 +245,35 @@ def test_backfill_flags_days_that_hit_the_cap(tmp_path):
         for line in (tmp_path / "backfill" / "finnhub.jsonl").read_text().splitlines()
     ]
     assert [(r["ticker"], r["capped"]) for r in records] == [("NVDA", True), ("KO", False)]
+
+
+def test_collect_asks_for_yesterday_and_today_and_stores_them(store, tmp_path):
+    asked = []
+
+    def fetch(ticker: str, day: date) -> list[dict]:
+        asked.append((ticker, day.isoformat()))
+        return [item(day.day), item(99, headline="")] if ticker == "NVDA" else []
+
+    nvda, ko = collect(["nvda", "KO"], store, fetch, tmp_path / "raw", now=lambda: FETCHED)
+
+    assert asked == [
+        ("NVDA", "2026-10-12"),
+        ("NVDA", "2026-10-13"),
+        ("KO", "2026-10-12"),
+        ("KO", "2026-10-13"),
+    ]
+    assert (nvda.fetched, nvda.inserted, nvda.dropped, nvda.error) == (4, 2, 2, None)
+    assert (ko.fetched, ko.error) == (0, None)  # a quiet ticker is not a failure
+    assert len(store.query("NVDA", before=LATER)) == 2
+    assert (tmp_path / "raw" / "finnhub" / "2026-01-11.jsonl").exists()
+
+
+def test_collect_reports_a_failing_ticker_and_carries_on(store):
+    def fetch(ticker: str, day: date) -> list[dict]:
+        if ticker == "NVDA":
+            raise FinnhubError("HTTP 500")
+        return [item()]
+
+    nvda, ko = collect(["NVDA", "KO"], store, fetch, now=lambda: FETCHED)
+    assert nvda.error == "FinnhubError: HTTP 500"
+    assert (ko.inserted, ko.error) == (1, None)
