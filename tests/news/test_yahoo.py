@@ -5,7 +5,18 @@ import pytest
 from yfinance.exceptions import YFRateLimitError
 
 from sluice.news.store import NewsStore
-from sluice.news.yahoo import RETRY_DELAYS, _retry, collect, fetch_raw, parse_item
+from sluice.news.yahoo import (
+    EMPTY_RETRY_DELAY,
+    RETRY_DELAYS,
+    TickerResult,
+    _retry,
+    _retry_empty,
+    collect,
+    fetch_raw,
+    import_archive,
+    parse_item,
+    write_run_log,
+)
 
 FETCHED = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 LATER = datetime(2027, 1, 1, tzinfo=UTC)
@@ -181,6 +192,65 @@ def test_other_errors_are_not_retried():
     with pytest.raises(ConnectionError):
         _retry(call, sleep=slept.append)
     assert slept == []
+
+
+def test_empty_answer_is_asked_once_more():
+    slept = []
+    answers = iter([[], ["ok"]])
+    assert _retry_empty(lambda: next(answers), sleep=slept.append) == ["ok"]
+    assert slept == [EMPTY_RETRY_DELAY]
+
+
+def test_empty_answer_twice_stays_empty_and_a_full_one_is_not_repeated():
+    slept = []
+    answers = iter([[], [], ["never asked"]])
+    assert _retry_empty(lambda: next(answers), sleep=slept.append) == []
+    assert _retry_empty(lambda: ["ok"], sleep=slept.append) == ["ok"]
+    assert slept == [EMPTY_RETRY_DELAY]
+
+
+def test_run_log_appends_one_line_per_run(tmp_path):
+    results = [TickerResult(ticker="NVDA", fetched=2, inserted=2), TickerResult(ticker="KO", error="x")]
+    path = write_run_log(tmp_path / "runs", FETCHED, results)
+    write_run_log(tmp_path / "runs", FETCHED, results)
+
+    assert path == tmp_path / "runs" / "2026-10-13.jsonl"
+    first, second = (json.loads(line) for line in path.read_text().splitlines())
+    assert first == second
+    assert first["started_at"] == FETCHED.isoformat()
+    assert [r["ticker"] for r in first["results"]] == ["NVDA", "KO"]
+    assert first["results"][1]["error"] == "x"
+
+
+def test_import_rebuilds_the_store_and_is_repeatable(store, tmp_path):
+    raw_dir = tmp_path / "raw"
+    batches = {"NVDA": [search_item(1), search_item(2, relatedTickers=["IBM"])], "MSFT": [search_item(1)]}
+    collect(["NVDA", "MSFT"], store, raw_dir=raw_dir, fetch=batches.__getitem__, now=lambda: FETCHED)
+
+    with NewsStore(tmp_path / "rebuilt.db") as rebuilt:
+        first = import_archive(raw_dir, rebuilt)
+        assert (first.records, first.inserted, first.skipped, first.dropped) == (3, 1, 1, 1)
+        again = import_archive(raw_dir, rebuilt)
+        assert (again.inserted, again.skipped) == (0, 2)
+        for ticker in ("NVDA", "MSFT"):
+            assert rebuilt.query(ticker, before=LATER) == store.query(ticker, before=LATER)
+
+
+def test_import_links_tickers_that_were_queried_in_any_run(store, tmp_path):
+    raw_dir = tmp_path / "raw"
+    item = search_item(1, relatedTickers=["NVDA", "MSFT"])
+    collect(["NVDA"], store, raw_dir=raw_dir, fetch=lambda _t: [item], now=lambda: FETCHED)
+    assert store.query("MSFT", before=LATER) == []  # MSFT was not being collected yet
+
+    other = search_item(9, relatedTickers=["IBM"])
+    collect(["MSFT"], store, raw_dir=raw_dir, fetch=lambda _t: [other], now=lambda: FETCHED)
+    with NewsStore(tmp_path / "rebuilt.db") as rebuilt:
+        import_archive(raw_dir, rebuilt)
+        assert [r.title for r in rebuilt.query("MSFT", before=LATER)] == [item["title"]]
+
+
+def test_import_of_a_missing_archive_is_empty(store, tmp_path):
+    assert import_archive(tmp_path / "nothing", store).records == 0
 
 
 @pytest.mark.integration

@@ -15,6 +15,7 @@ from sluice.universe import canonical
 
 SOURCE = "yfinance"
 RETRY_DELAYS = (2.0, 4.0, 8.0)  # seconds; rate limits only
+EMPTY_RETRY_DELAY = 5.0  # seconds; Yahoo sometimes answers with nothing, then recovers
 
 # yfinance turns some failed requests into an empty result; make them raise instead.
 yf.config.debug.hide_exceptions = False
@@ -29,6 +30,13 @@ class TickerResult(BaseModel):
     error: str | None = None
 
 
+class ImportResult(BaseModel):
+    records: int = 0
+    inserted: int = 0
+    skipped: int = 0
+    dropped: int = 0
+
+
 def _retry(call: Callable[[], list], sleep: Callable[[float], None] = time.sleep) -> list:
     for delay in RETRY_DELAYS:
         try:
@@ -38,12 +46,25 @@ def _retry(call: Callable[[], list], sleep: Callable[[float], None] = time.sleep
     return call()
 
 
-def fetch_raw(ticker: str, count: int = 50) -> list[dict]:
-    """Raw news items for one ticker: the quote feed, or Yahoo search when the feed is empty."""
+def _retry_empty(call: Callable[[], list], sleep: Callable[[float], None] = time.sleep) -> list:
+    """Ask once more when the answer is empty."""
+    items = call()
+    if not items:
+        sleep(EMPTY_RETRY_DELAY)
+        items = call()
+    return items
+
+
+def _fetch_once(ticker: str, count: int) -> list[dict]:
     feed = _retry(lambda: yf.Ticker(ticker).get_news(count=count))
     if feed:
         return feed
     return _retry(lambda: yf.Search(ticker, news_count=count, max_results=0).news) or []
+
+
+def fetch_raw(ticker: str, count: int = 50) -> list[dict]:
+    """Raw news items for one ticker: the quote feed, or Yahoo search when the feed is empty."""
+    return _retry_empty(lambda: _fetch_once(ticker, count))
 
 
 def _raw_id(raw: dict) -> str | None:
@@ -159,3 +180,46 @@ def collect(
         added = store.add(kept)
         result.inserted, result.skipped = added.inserted, added.skipped
     return results
+
+
+def write_run_log(run_dir: Path, started_at: datetime, results: list[TickerResult]) -> Path:
+    """Append one line per run, so gaps can be found long after the CI logs are gone."""
+    path = run_dir / f"{started_at:%Y-%m-%d}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "started_at": started_at.isoformat(),
+        "source": SOURCE,
+        "results": [r.model_dump() for r in results],
+    }
+    with path.open("a") as out:
+        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
+def import_archive(raw_dir: Path, store: NewsStore) -> ImportResult:
+    """Load the raw JSONL archive into the store. Safe to repeat.
+
+    Items are linked to every ticker that was ever queried, so a ticker added
+    to collection later also picks up older items that were tagged with it.
+    """
+    files = sorted((raw_dir / SOURCE).glob("*.jsonl"))
+    allowed = set()
+    for path in files:
+        with path.open() as lines:
+            allowed.update(canonical(json.loads(line)["ticker"]) for line in lines)
+
+    result = ImportResult()
+    for path in files:
+        with path.open() as lines:
+            records = [json.loads(line) for line in lines]
+        items = [
+            parse_item(r["raw"], r["ticker"], datetime.fromisoformat(r["fetched_at"]), allowed)
+            for r in records
+        ]
+        kept = [item for item in items if item is not None]
+        added = store.add(kept)
+        result.records += len(records)
+        result.dropped += len(items) - len(kept)
+        result.inserted += added.inserted
+        result.skipped += added.skipped
+    return result

@@ -101,11 +101,15 @@ pip install -e ".[dev]"
 sluice --version
 sluice news collect                      # fetch recent Yahoo Finance news for the universe
 sluice news collect --tickers NVDA,AMD   # or for chosen tickers
+sluice news import                       # rebuild the store from the raw archive
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
-responses under `data/raw/` as JSONL, so the database can be rebuilt. Further
-subcommands will be added as each roadmap step lands.
+responses as JSONL. `news import` loads archived items into the store, so the
+database can always be rebuilt. Scheduled collection runs in a separate private
+data repository, cloned to `data/`; items collected by hand are archived under
+`data/local/` so they never conflict with it. Further subcommands will be added
+as each roadmap step lands.
 
 ## Development
 
