@@ -7,9 +7,9 @@ position sizes with code rather than with an LLM.
 This is a research and decision-support tool. It does not place orders, and
 nothing here is financial advice.
 
-> **Status: early.** The repository currently contains packaging and an empty
-> package skeleton. The sections below describe the design being built; the
-> roadmap shows what exists.
+> **Status: early.** The repository currently contains the news store and a
+> Yahoo Finance collector. The sections below describe the design being built;
+> the roadmap shows what exists.
 
 ## Why
 
@@ -100,9 +100,13 @@ pip install -e ".[dev]"
 
 ```bash
 sluice --version
+sluice news collect                      # fetch recent Yahoo Finance news for the universe
+sluice news collect --tickers NVDA,AMD   # or for chosen tickers
 ```
 
-Subcommands will be added as each roadmap step lands.
+`news collect` adds new items to `data/news.db` and archives the raw vendor
+responses under `data/raw/` as JSONL, so the database can be rebuilt. Further
+subcommands will be added as each roadmap step lands.
 
 ## Development
 
