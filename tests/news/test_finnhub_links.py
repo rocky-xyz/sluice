@@ -43,7 +43,9 @@ def run(raw_dir, resolve, **kwargs):
     [
         (FOOL, "Motley Fool"),
         ("https://247wallst.com/investing/2026/01/09/x/", "24/7 Wall St."),
-        ("https://investorshub.advfn.com/a/1", "investorshub.advfn.com"),
+        ("https://investorshub.advfn.com/a/1", "InvestorsHub"),
+        ("https://app.moby.co/a/1", "Moby"),
+        ("https://news.example.org/a/1", "news.example.org"),
         ("https://www.Axios.com/2026/01/09/x", "axios.com"),
         (YAHOO, None),
         ("https://sg.finance.yahoo.com/news/x.html", None),

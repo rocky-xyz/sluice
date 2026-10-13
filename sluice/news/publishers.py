@@ -1,21 +1,39 @@
 from urllib.parse import urlsplit
 
 # Article host -> publisher name, spelled as Yahoo Finance spells it, so that the
-# same outlet gets one name whichever vendor the article came from.
+# same outlet gets one name whichever vendor the article came from. Only names seen
+# in Yahoo's own feed are listed; every other site is named by its host.
 DOMAIN_PUBLISHERS = {
     "247wallst.com": "24/7 Wall St.",
     "barchart.com": "Barchart",
     "barrons.com": "Barrons.com",
+    "beincrypto.com": "BeInCrypto",
+    "benzinga.com": "Benzinga",
+    "blockspace.media": "Blockspace",
+    "entrepreneur.com": "Entrepreneur",
+    "etf.com": "etf.com",
     "fool.com": "Motley Fool",
     "gurufocus.com": "GuruFocus.com",
     "insidermonkey.com": "Insider Monkey",
     "investopedia.com": "Investopedia",
     "investors.com": "Investor's Business Daily",
+    "investorshub.advfn.com": "InvestorsHub",
+    "just-drinks.com": "Just Drinks",
+    "kiplinger.com": "Kiplinger",
+    "marketbeat.com": "MarketBeat",
+    "marketwatch.com": "MarketWatch",
+    "medtechdive.com": "MedTech Dive",
+    "moby.co": "Moby",
+    "proactiveinvestors.com": "Proactive",
+    "qz.com": "Quartz",
     "simplywall.st": "Simply Wall St.",
     "stocktwits.com": "Stocktwits",
+    "telegraph.co.uk": "The Telegraph",
     "thestreet.com": "TheStreet",
     "tikr.com": "TIKR",
     "trefis.com": "Trefis",
+    "verdict.co.uk": "Verdict",
+    "wsj.com": "The Wall Street Journal",
     "zacks.com": "Zacks",
 }
 
