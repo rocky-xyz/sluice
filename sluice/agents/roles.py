@@ -12,15 +12,21 @@ from sluice.agents.state import (
     PipelineState,
     PriceInput,
     Report,
+    Side,
+    Turn,
     Verdict,
     cited_refs,
 )
 from sluice.news.timeutil import ET
+from sluice.universe import UNIVERSE
 
 MARKET_ANALYST = "market_analyst"
 NEWS_ANALYST = "news_analyst"
 FUNDAMENTALS_ANALYST = "fundamentals_analyst"
+BULL = "bull"
+BEAR = "bear"
 RESEARCH_MANAGER = "research_manager"
+OUTSIDE_UNIVERSE = "Outside the studied universe: there is no backtest evidence for this ticker."
 # Each analyst and the channel key of its report.
 ANALYSTS = {MARKET_ANALYST: "market", NEWS_ANALYST: "news", FUNDAMENTALS_ANALYST: "fundamentals"}
 
@@ -208,24 +214,61 @@ def fundamentals_analyst(state: PipelineState, llm: CachedLLM, config: PipelineC
     )
 
 
-def manager_prompt(meta: Meta, reports: dict[str, Report]) -> str:
-    """Reports only: the manager never sees the pre-fetched inputs."""
+def has_data(reports: dict[str, Report]) -> bool:
+    return any(not report.no_data for report in reports.values())
+
+
+def citable_refs(inputs: Inputs, reports: dict[str, Report]) -> set[str]:
+    """What roles after the analysts may cite: ids that a report cites.
+
+    Reports were checked against the inputs, so these all exist there.
+    """
+    return set().union(*(cited_refs(r.text) for r in reports.values())) & inputs.refs()
+
+
+def reports_prompt(meta: Meta, reports: dict[str, Report], debate: list[Turn]) -> str:
+    """Reports and debate turns only: nobody after the analysts sees the pre-fetched inputs."""
     parts = [_header(meta)]
     for name, report in sorted(reports.items()):
         marker = " (no data)" if report.no_data else ""
         parts.append(f"## {name} report{marker}\n{report.text}")
+    for turn in debate:
+        parts.append(f"## debate, round {turn.round}, {turn.side}\n{turn.text}")
     return "\n\n".join(parts)
+
+
+def debater(state: PipelineState, llm: CachedLLM, config: PipelineConfig, side: Side) -> dict:
+    """One turn of the debate: argues one side from the reports and the turns so far."""
+    meta, reports = state["meta"], state["reports"]
+    debate = state.get("debate", [])
+    round_number = sum(turn.side == side for turn in debate) + 1
+    citable = citable_refs(state["inputs"], reports)
+
+    def check(answer: LLMResponse) -> Turn:
+        text = answer.text.strip()
+        cited = cited_refs(text)
+        if not cited:
+            raise ValueError("the turn cites no reference id")
+        if unknown := sorted(cited - citable):
+            raise ValueError(f"the turn cites ids that are not in the reports: {unknown}")
+        return Turn(round=round_number, side=side, text=text)
+
+    request = _request(config, side, reports_prompt(meta, reports, debate))
+    try:
+        turn, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
+    except LLMError as error:
+        return _failed(meta, side, error, request.model)
+    return {"debate": [turn], "usage": _calls(side, request.model, answers)}
 
 
 def research_manager(state: PipelineState, llm: CachedLLM, config: PipelineConfig) -> dict:
     """Reads the reports, gives the rating. Its evidence may only cite what the reports cite."""
     meta, inputs, reports = state["meta"], state["inputs"], state["reports"]
-    if all(report.no_data for report in reports.values()):
+    if not has_data(reports):
         failure = f"{RESEARCH_MANAGER}: no report has any data"
         return {"meta": meta.model_copy(update={"status": "failed", "failure": failure})}
 
-    # Reports were checked against the inputs, so these ids all exist there.
-    citable = set().union(*(cited_refs(r.text) for r in reports.values())) & inputs.refs()
+    citable = citable_refs(inputs, reports)
 
     def check(answer: LLMResponse) -> Verdict:
         verdict = Verdict.model_validate_json(answer.text)
@@ -234,12 +277,15 @@ def research_manager(state: PipelineState, llm: CachedLLM, config: PipelineConfi
             raise ValueError(f"the evidence cites ids that are not in the reports: {unknown}")
         return verdict
 
-    request = _request(config, RESEARCH_MANAGER, manager_prompt(meta, reports), json_mode=True)
+    prompt = reports_prompt(meta, reports, state.get("debate", []))
+    request = _request(config, RESEARCH_MANAGER, prompt, json_mode=True)
     try:
         verdict, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
     except LLMError as error:
         return _failed(meta, RESEARCH_MANAGER, error, request.model)
     notes = [f"Gap in {gap.kind}: {gap.reason}." for gap in inputs.gaps]
+    if meta.mode == "adhoc" and meta.ticker not in UNIVERSE:
+        notes.append(OUTSIDE_UNIVERSE)
     return {
         "decision": Decision(**verdict.model_dump(), notes=notes),
         "usage": _calls(RESEARCH_MANAGER, request.model, answers),

@@ -1,4 +1,5 @@
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from sluice.agents import roles
 from sluice.agents.config import PipelineConfig
 from sluice.agents.llm import CachedLLM
 from sluice.agents.prefetch import prefetch
-from sluice.agents.state import STATE_MODELS, Meta, PipelineState, RunMode, make_run_id
+from sluice.agents.state import STATE_MODELS, Gap, Meta, PipelineState, RunMode, make_run_id
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
@@ -24,32 +25,55 @@ DEFAULT_CHECKPOINTS = Path("data/local/checkpoints.db")
 
 @dataclass(frozen=True)
 class Deps:
-    """What the nodes need besides the state."""
+    """What the nodes need besides the state.
+
+    The two callables are only used by an ad-hoc run, before it pre-fetches:
+    they bring in what the stores lack for a ticker nobody collected, and
+    return the reason when they could not.
+    """
 
     store: NewsStore
     prices: PriceStore
     statements: FundamentalsStore
     llm: CachedLLM
     config: PipelineConfig
+    collect_news: Callable[[str], str | None] | None = None
+    fetch_statements: Callable[[str], str | None] | None = None
 
 
 def build_graph(
     deps: Deps, checkpointer: BaseCheckpointSaver | None = None
 ) -> CompiledStateGraph:
-    """prefetch -> three analysts side by side -> research manager.
+    """prefetch -> three analysts side by side -> bull/bear debate -> research manager.
 
     The analysts do not depend on each other. `analysts_done` waits for all
-    three, so the manager runs once and only when none of them failed. The
-    manager validates its own answer, because a rejected answer has to be asked
-    again and the retry lives with the call.
+    three, so what follows runs once and only when none of them failed. The
+    debate is a loop: bull, bear, and back to bull until the configured number
+    of rounds is done. Any role that fails ends the run. The manager validates
+    its own answer, because a rejected answer has to be asked again and the
+    retry lives with the call.
+
+    Backtests and ad-hoc runs share this graph. An ad-hoc run only does more
+    before pre-fetching: it brings its ticker's news and statements up to date.
     """
+    rounds = deps.config.debate_rounds
 
     def prefetch_node(state: PipelineState) -> dict:
         meta = state["meta"]
+        failures = []
+        if meta.mode == "adhoc":
+            if deps.collect_news and (error := deps.collect_news(meta.ticker)):
+                failures.append(Gap(kind="news", reason=f"live collection failed: {error}"))
+            if (
+                deps.fetch_statements
+                and deps.statements.quarters(meta.ticker) is None
+                and (error := deps.fetch_statements(meta.ticker))
+            ):
+                failures.append(Gap(kind="fundamentals", reason=f"fetch failed: {error}"))
         inputs = prefetch(
             deps.store, deps.prices, deps.statements, meta.ticker, meta.decision_time, deps.config
         )
-        return {"inputs": inputs}
+        return {"inputs": inputs.model_copy(update={"gaps": [*failures, *inputs.gaps]})}
 
     def market_analyst_node(state: PipelineState) -> dict:
         return roles.market_analyst(state, deps.llm, deps.config)
@@ -63,11 +87,31 @@ def build_graph(
     def analysts_done_node(state: PipelineState) -> dict:
         return {}
 
+    def bull_node(state: PipelineState) -> dict:
+        return roles.debater(state, deps.llm, deps.config, roles.BULL)
+
+    def bear_node(state: PipelineState) -> dict:
+        return roles.debater(state, deps.llm, deps.config, roles.BEAR)
+
     def research_manager_node(state: PipelineState) -> dict:
         return roles.research_manager(state, deps.llm, deps.config)
 
     def after_analysts(state: PipelineState) -> str:
-        return END if state["meta"].status == "failed" else roles.RESEARCH_MANAGER
+        if state["meta"].status == "failed":
+            return END
+        # Nothing to argue about without rounds or without a single report with data.
+        if rounds == 0 or not roles.has_data(state["reports"]):
+            return roles.RESEARCH_MANAGER
+        return roles.BULL
+
+    def after_bull(state: PipelineState) -> str:
+        return END if state["meta"].status == "failed" else roles.BEAR
+
+    def after_bear(state: PipelineState) -> str:
+        if state["meta"].status == "failed":
+            return END
+        finished = sum(turn.side == roles.BEAR for turn in state["debate"])
+        return roles.RESEARCH_MANAGER if finished >= rounds else roles.BULL
 
     analysts = {
         roles.MARKET_ANALYST: market_analyst_node,
@@ -77,13 +121,19 @@ def build_graph(
     graph = StateGraph(PipelineState)
     graph.add_node("prefetch", prefetch_node)
     graph.add_node("analysts_done", analysts_done_node)
+    graph.add_node(roles.BULL, bull_node)
+    graph.add_node(roles.BEAR, bear_node)
     graph.add_node(roles.RESEARCH_MANAGER, research_manager_node)
     graph.add_edge(START, "prefetch")
     for name, node in analysts.items():
         graph.add_node(name, node)
         graph.add_edge("prefetch", name)
     graph.add_edge(list(analysts), "analysts_done")
-    graph.add_conditional_edges("analysts_done", after_analysts, [roles.RESEARCH_MANAGER, END])
+    graph.add_conditional_edges(
+        "analysts_done", after_analysts, [roles.BULL, roles.RESEARCH_MANAGER, END]
+    )
+    graph.add_conditional_edges(roles.BULL, after_bull, [roles.BEAR, END])
+    graph.add_conditional_edges(roles.BEAR, after_bear, [roles.BULL, roles.RESEARCH_MANAGER, END])
     graph.add_edge(roles.RESEARCH_MANAGER, END)
     return graph.compile(checkpointer=checkpointer)
 

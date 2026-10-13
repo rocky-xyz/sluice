@@ -45,12 +45,15 @@ NEWS = NewsConfig(lookback_days=14, max_items=50)
 CONFIG = PipelineConfig(
     version="t1",
     digest="abc12345",
+    debate_rounds=0,  # most tests are about everything but the debate
     temperature=0.0,
     retries=2,
     models={
         "market_analyst": "fast-model",
         "news_analyst": "fast-model",
         "fundamentals_analyst": "fast-model",
+        "bull": "fast-model",
+        "bear": "fast-model",
         "research_manager": "deep-model",
     },
     prices=PricesConfig(lookback_days=250, benchmark="SPY"),
@@ -60,6 +63,8 @@ CONFIG = PipelineConfig(
         "market_analyst": "You are the market analyst.",
         "news_analyst": "You are the news analyst.",
         "fundamentals_analyst": "You are the fundamentals analyst.",
+        "bull": "You argue for.",
+        "bear": "You argue against.",
         "research_manager": "You decide.",
     },
 )
@@ -119,11 +124,15 @@ class FakeModel:
         manager=None,
         market=("The trend is up [P:ret_5d].",),
         fundamentals=("Revenue keeps growing [F:revenue_q0].",),
+        bull=("It will rise [N1].",),
+        bear=("It will fall [P:ret_5d].",),
     ):
         self.answers = {
             "market_analyst": list(market),
             "news_analyst": list(analyst),
             "fundamentals_analyst": list(fundamentals),
+            "bull": list(bull),
+            "bear": list(bear),
             "research_manager": list(manager if manager is not None else [verdict("N1")]),
         }
         self.requests: list[tuple[str, LLMRequest]] = []
@@ -142,7 +151,14 @@ class FakeModel:
 
 
 def pipeline(
-    store, tmp_path, model, cache_name="llm.db", checkpoints=True, with_statements=True
+    store,
+    tmp_path,
+    model,
+    cache_name="llm.db",
+    checkpoints=True,
+    with_statements=True,
+    config=CONFIG,
+    **extra,
 ):
     cache = CallCache(tmp_path / cache_name)
     saver = open_checkpointer(tmp_path / "checkpoints.db") if checkpoints else None
@@ -154,15 +170,15 @@ def pipeline(
     if with_statements:
         stock(statements, "NVDA")
     llm = CachedLLM(cache, model, sleep=lambda _: None)
-    return build_graph(Deps(store, prices, statements, llm, CONFIG), saver)
+    return build_graph(Deps(store, prices, statements, llm, config, **extra), saver)
 
 
 def roles_used(state) -> list[tuple[str, bool]]:
     return sorted((call.role, call.cached) for call in state["usage"])
 
 
-def go(graph, repeat=0):
-    return run(graph, CONFIG, "NVDA", CLOSE, repeat=repeat)
+def go(graph, repeat=0, **kwargs):
+    return run(graph, CONFIG, kwargs.pop("ticker", "NVDA"), CLOSE, repeat=repeat, **kwargs)
 
 
 # --- decision time ---
@@ -265,8 +281,9 @@ def test_the_shipped_config_loads():
     config = load_config("v1", Path(__file__).parents[2] / "configs")
     assert config.version == "v1"
     assert set(config.models) == set(config.prompts) == {
-        "market_analyst", "news_analyst", "fundamentals_analyst", "research_manager",
+        "market_analyst", "news_analyst", "fundamentals_analyst", "bull", "bear", "research_manager",
     }  # fmt: skip
+    assert config.debate_rounds == 1
     assert (config.fundamentals.lag_days, config.fundamentals.quarters) == (60, 4)
     assert (config.prices.lookback_days, config.prices.benchmark) == (250, "SPY")
     assert (config.temperature, config.retries) == (0.0, 2)
@@ -313,7 +330,7 @@ def test_each_role_uses_its_configured_model_prompt_and_temperature(stocked, tmp
     model = FakeModel()
     go(pipeline(stocked, tmp_path, model))
 
-    assert sorted(role for role, _ in model.requests) == sorted(CONFIG.models)
+    assert sorted(role for role, _ in model.requests) == sorted(set(CONFIG.models) - {"bull", "bear"})
     assert model.requests[-1][0] == "research_manager"  # after all three analysts
     for role, request in model.requests:
         assert request.model == CONFIG.models[role]
@@ -635,3 +652,191 @@ def test_the_manager_may_cite_what_any_report_cites(stocked, tmp_path):
     model = FakeModel(manager=[verdict("P:ret_5d", "N1", "F:revenue_q0")])
     state = go(pipeline(stocked, tmp_path, model))
     assert state["decision"].evidence[0].refs == ["P:ret_5d", "N1", "F:revenue_q0"]
+
+
+# --- debate ---
+
+
+def debating(rounds: int) -> PipelineConfig:
+    return CONFIG.model_copy(update={"debate_rounds": rounds})
+
+
+def spoken(model: FakeModel) -> list[str]:
+    return [role for role, _ in model.requests if role in ("bull", "bear")]
+
+
+@pytest.mark.parametrize("rounds", [0, 1, 2, 3])
+def test_n_rounds_give_2n_turns_bull_first(stocked, tmp_path, rounds):
+    model = FakeModel()
+    state = go(pipeline(stocked, tmp_path, model, config=debating(rounds)))
+
+    assert [(t.round, t.side) for t in state.get("debate", [])] == [
+        (n, side) for n in range(1, rounds + 1) for side in ("bull", "bear")
+    ]
+    assert spoken(model) == ["bull", "bear"] * rounds
+    assert model.requests[-1][0] == "research_manager"
+    assert state["meta"].status == "ok"
+    assert len(dump_state(state)["debate"]) == 2 * rounds
+
+
+def test_each_turn_sees_the_reports_and_the_turns_before_it_but_no_inputs(stocked, tmp_path):
+    model = FakeModel(bull=["Up first [N1].", "Up again [N2]."], bear=["Down first [N1]."])
+    state = go(pipeline(stocked, tmp_path, model, config=debating(2)))
+    prompts = [r.messages[1].content for role, r in model.requests if role in ("bull", "bear")]
+    first_bull, first_bear, second_bull, second_bear = prompts
+
+    for prompt in prompts:
+        assert all(report.text in prompt for report in state["reports"].values())
+        assert not any(item.title in prompt for item in state["inputs"].news)
+    assert "debate" not in first_bull  # the opening turn has nothing to answer
+    assert "Up first [N1]." in first_bear and "Down first" not in first_bear
+    assert "Up first [N1]." in second_bull and "Down first [N1]." in second_bull
+    assert "Up again [N2]." in second_bear
+
+    manager = model.asked("research_manager")[0].messages[1].content
+    for turn in state["debate"]:
+        assert f"## debate, round {turn.round}, {turn.side}\n{turn.text}" in manager
+
+
+def test_a_turn_citing_nothing_or_something_outside_the_reports_is_asked_again(stocked, tmp_path):
+    # N2 exists but no report cites it here
+    model = FakeModel(
+        analyst=["Demand is strong [N1]."],
+        bull=["It just will.", "Because [N2].", "Because [N999].", "It will rise [N1]."],
+    )
+    config = debating(1).model_copy(update={"retries": 3})
+    state = go(pipeline(stocked, tmp_path, model, config=config))
+
+    assert state["debate"][0].text == "It will rise [N1]."
+    assert len(model.asked("bull")) == 4
+    assert [c.role for c in state["usage"]].count("bull") == 4
+
+
+@pytest.mark.parametrize(
+    ("answers", "asked"),
+    [({"bull": [LLMError("HTTP 401")]}, ["bull"]), ({"bear": ["No sources."]}, ["bull"] + ["bear"] * 3)],
+)
+def test_a_failed_debater_ends_the_run_without_a_rating(stocked, tmp_path, answers, asked):
+    model = FakeModel(**answers)
+    state = go(pipeline(stocked, tmp_path, model, config=debating(2)))
+
+    assert state["meta"].status == "failed"
+    assert state["meta"].failure.startswith(asked[-1] + ":")
+    assert spoken(model) == asked
+    assert model.asked("research_manager") == []
+    assert state.get("decision") is None
+
+
+def test_there_is_no_debate_when_no_report_has_data(store, tmp_path):
+    model = FakeModel()
+    cache = CallCache(tmp_path / "llm.db")
+    empty = Deps(
+        store,
+        PriceStore(tmp_path / "none.db"),
+        FundamentalsStore(tmp_path / "none"),
+        CachedLLM(cache, model),
+        debating(1),
+    )
+    state = go(build_graph(empty))
+    assert model.requests == []
+    assert state["meta"].failure == "research_manager: no report has any data"
+
+
+def test_an_interrupted_debate_continues_with_the_next_turn(stocked, tmp_path):
+    model = FakeModel(bear=[RuntimeError("power cut"), "It will fall [N1]."])
+    with pytest.raises(RuntimeError, match="power cut"):
+        go(pipeline(stocked, tmp_path, model, config=debating(2)))
+
+    # an empty cache: only the checkpoint can spare the bull its first turn
+    state = go(pipeline(stocked, tmp_path, model, cache_name="fresh.db", config=debating(2)))
+    assert state["meta"].status == "ok"
+    assert spoken(model) == ["bull", "bear", "bear", "bull", "bear"]
+    assert [(t.round, t.side) for t in state["debate"]] == [
+        (1, "bull"), (1, "bear"), (2, "bull"), (2, "bear"),
+    ]  # fmt: skip
+
+
+# --- ad-hoc runs ---
+
+
+def test_an_adhoc_run_collects_first_and_uses_the_same_graph(store, tmp_path):
+    seen = []
+
+    def collect_news(ticker):
+        seen.append(("news", ticker))
+        store.add([article(1, CLOSE - timedelta(hours=1)), article(2, CLOSE + timedelta(hours=1))])
+
+    def fetch_statements(ticker):
+        seen.append(("statements", ticker))
+        stock(FundamentalsStore(tmp_path / "statements"), ticker)
+
+    model = FakeModel(analyst=["Demand is strong [N1]."])
+    graph = pipeline(
+        store, tmp_path, model, with_statements=False,
+        collect_news=collect_news, fetch_statements=fetch_statements,
+    )  # fmt: skip
+    state = go(graph, mode="adhoc")
+
+    assert seen == [("news", "NVDA"), ("statements", "NVDA")]
+    assert state["meta"].mode == "adhoc"
+    assert [item.title for item in state["inputs"].news] == ["Chipmaker headline 1"]
+    assert len(state["inputs"].fundamentals) == 42
+    assert state["inputs"].gaps == []
+    assert state["decision"].notes == []  # NVDA is in the universe
+    assert sorted(role for role, _ in model.requests) == sorted(set(CONFIG.models) - {"bull", "bear"})
+
+
+def test_a_backtest_never_collects_or_fetches(stocked, tmp_path):
+    def forbidden(ticker):
+        raise AssertionError("a backtest must not reach out")
+
+    model = FakeModel(manager=[verdict("N1")])
+    graph = pipeline(
+        stocked, tmp_path, model, with_statements=False,
+        collect_news=forbidden, fetch_statements=forbidden,
+    )  # fmt: skip
+    state = go(graph)
+    assert state["meta"].status == "ok"
+    assert "Gap in fundamentals: no statements stored for this ticker." in state["decision"].notes
+
+
+def test_stored_statements_are_not_fetched_again(stocked, tmp_path):
+    fetched = []
+    graph = pipeline(
+        stocked, tmp_path, FakeModel(),
+        collect_news=lambda ticker: None, fetch_statements=fetched.append,
+    )  # fmt: skip
+    go(graph, mode="adhoc")
+    assert fetched == []
+
+
+def test_failed_collection_is_a_gap_and_the_run_goes_on_with_what_is_stored(stocked, tmp_path):
+    graph = pipeline(
+        stocked, tmp_path, FakeModel(), with_statements=False,
+        collect_news=lambda ticker: "no items returned",
+        fetch_statements=lambda ticker: "rate or daily limit reached",
+    )  # fmt: skip
+    state = go(graph, mode="adhoc")
+
+    assert state["meta"].status == "ok"
+    assert len(state["inputs"].news) == 2
+    assert state["decision"].notes == [
+        "Gap in news: live collection failed: no items returned.",
+        "Gap in fundamentals: fetch failed: rate or daily limit reached.",
+        "Gap in fundamentals: no statements stored for this ticker.",
+    ]
+
+
+def test_an_adhoc_ticker_outside_the_universe_is_marked(store, tmp_path):
+    store.add([article(1, CLOSE - timedelta(hours=1)).model_copy(update={"tickers": ["TSLA"]})])
+    model = FakeModel(analyst=["Demand is strong [N1]."], market=["unused"], fundamentals=["unused"])
+
+    state = go(pipeline(store, tmp_path, model, with_statements=False), ticker="TSLA", mode="adhoc")
+    assert state["meta"].status == "ok"
+    assert state["decision"].notes[-1] == (
+        "Outside the studied universe: there is no backtest evidence for this ticker."
+    )
+
+    # the same ticker as a backtest is not marked: the note is about ad-hoc analysis
+    again = go(pipeline(store, tmp_path, model, with_statements=False), ticker="TSLA", repeat=1)
+    assert not any("universe" in note for note in again["decision"].notes)

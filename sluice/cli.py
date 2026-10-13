@@ -35,8 +35,13 @@ def main(
 def analyze(
     ticker: Annotated[str, typer.Argument(help="Ticker to analyse.")],
     day: Annotated[
-        str, typer.Option("--date", help="Decision day (YYYY-MM-DD); decides at its close.")
-    ],
+        str | None,
+        typer.Option(
+            "--date",
+            help="Decision day (YYYY-MM-DD): a backtest run deciding at its close. "
+            "Without it the run is ad hoc: it decides now and first collects the ticker's news.",
+        ),
+    ] = None,
     config_version: Annotated[
         str, typer.Option("--config", help="Pipeline config version under configs/pipeline/.")
     ] = "v1",
@@ -46,10 +51,10 @@ def analyze(
         Path | None, typer.Option("--out", help="Write the full run state to this JSON file.")
     ] = None,
 ) -> None:
-    """Run the research pipeline for one ticker as of one trading day's close."""
+    """Run the research pipeline for one ticker, as of a past close or as of now."""
     import json
     import os
-    from datetime import date
+    from datetime import UTC, date, datetime
 
     from sluice.agents.cache import CallCache
     from sluice.agents.config import load_config
@@ -57,7 +62,10 @@ def analyze(
     from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient
     from sluice.agents.prefetch import backtest_decision_time
     from sluice.agents.state import dump_state
+    from sluice.fundamentals import alphavantage
+    from sluice.fundamentals import store as statements_store
     from sluice.fundamentals.store import FundamentalsStore
+    from sluice.news import yahoo
     from sluice.news.store import NewsStore
     from sluice.prices.store import PriceStore
     from sluice.prices.yahoo import fetch_bars
@@ -66,19 +74,37 @@ def analyze(
     if not key:
         typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
         raise typer.Exit(code=2)
-    try:
-        decision_time = backtest_decision_time(date.fromisoformat(day))
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--date") from exc
+    if day is None:
+        mode, decision_time = "adhoc", datetime.now(UTC)
+    else:
+        mode = "backtest"
+        try:
+            decision_time = backtest_decision_time(date.fromisoformat(day))
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--date") from exc
     config = load_config(config_version)
+    statements = FundamentalsStore()
 
     checkpointer = open_checkpointer()
     try:
         with NewsStore(db) as store, PriceStore(fetch=fetch_bars) as prices, CallCache() as cache:
+
+            def collect_news(symbol: str) -> str | None:
+                return yahoo.collect([symbol], store, raw_dir=Path("data/local/raw"))[0].error
+
+            def fetch_statements(symbol: str) -> str | None:
+                vendor_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+                if not vendor_key:
+                    return "ALPHA_VANTAGE_API_KEY is not set"
+                result = statements_store.fetch(
+                    [symbol], alphavantage.Client(vendor_key), statements
+                )
+                return result.stopped or next(iter(result.failed), None)
+
             llm = CachedLLM(cache, DeepSeekClient(key))
-            deps = Deps(store, prices, FundamentalsStore(), llm, config)
+            deps = Deps(store, prices, statements, llm, config, collect_news, fetch_statements)
             graph = build_graph(deps, checkpointer)
-            state = run(graph, config, ticker, decision_time, repeat=repeat)
+            state = run(graph, config, ticker, decision_time, repeat=repeat, mode=mode)
     finally:
         checkpointer.conn.close()
 

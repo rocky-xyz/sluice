@@ -107,6 +107,7 @@ sluice news resolve-links                # record where Finnhub's article links 
 sluice news import                       # rebuild the store from the raw archive
 sluice fundamentals fetch                # quarterly statements from Alpha Vantage (resumable; 25 calls a day)
 sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
+sluice analyze TSLA                      # or as of now, for any ticker: collects its news first
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
@@ -123,12 +124,21 @@ collection runs in a separate private data repository,
 cloned to `data/`; items collected by hand are archived under `data/local/` so
 they never conflict with it.
 
-`analyze` runs the pipeline for one ticker as of one trading day's close. So far
-the pipeline has no debate yet: code fetches what was known at the close, then
-a market analyst, a news analyst and a fundamentals analyst each write a report
-that cites its sources by id, side by side, and a research manager gives a
-five-step rating with a confidence and an evidence list. Answers that cite an
-id that was never given are rejected and asked again. Model calls
+`analyze` runs the pipeline for one ticker. Code fetches what was known at the
+decision time; a market analyst, a news analyst and a fundamentals analyst each
+write a report that cites its sources by id, side by side; a bullish and a
+bearish debater argue from those reports for a configured number of rounds; and
+a research manager gives a five-step rating with a confidence and an evidence
+list. Only the analysts see the data. Answers that cite an id that was never
+given, or that no report cites, are rejected and asked again. The pipeline
+extracts and weighs information; it does not size positions.
+
+With `--date` the run is a backtest that decides at that trading day's close
+and touches no network except the model. Without it the run is ad hoc: it
+decides now, first collects the ticker's news from Yahoo Finance and, if none
+are stored, its statements from Alpha Vantage (three calls), and uses the last
+finished trading day's prices. Both use the same graph, roles and config. A
+ticker outside the studied universe is marked as having no backtest evidence. Model calls
 are cached in `data/local/llm_cache.db` and each run is checkpointed, so
 repeating a finished run costs nothing; `--out` writes the full run state as
 JSON. Models, prompts and limits live in `configs/pipeline/`, one file per

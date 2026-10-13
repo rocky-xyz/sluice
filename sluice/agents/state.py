@@ -11,6 +11,7 @@ from sluice.news.timeutil import to_utc
 RunMode = Literal["backtest", "adhoc"]
 Status = Literal["ok", "failed"]
 Rating = Literal["buy", "overweight", "hold", "underweight", "sell"]
+Side = Literal["bull", "bear"]
 GapKind = Literal["prices", "news", "fundamentals"]
 FigureUnit = Literal["amount", "ratio", "points", "multiple"]
 
@@ -88,7 +89,7 @@ class Report(BaseModel):
 
 class Turn(BaseModel):
     round: int = Field(ge=1)
-    side: Literal["bull", "bear"]
+    side: Side
     text: str
 
 

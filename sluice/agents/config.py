@@ -35,6 +35,7 @@ class PipelineConfig(BaseModel):
 
     version: str  # the file's name
     digest: str  # short hash of the file, so an edit in place does not pass as the same version
+    debate_rounds: int = Field(ge=0)  # one round is a bull turn then a bear turn; 0 skips it
     temperature: float = Field(ge=0)
     retries: int = Field(ge=0)
     models: dict[str, str]  # role -> model
