@@ -32,6 +32,15 @@ def _trading_hours(day: date) -> tuple[datetime, datetime] | None:
     )
 
 
+def close_of(day: date) -> datetime | None:
+    """When regular trading ends on a New York trading day, in UTC; None when the market is shut.
+
+    Follows early closes: 13:00 Eastern on the day after Thanksgiving, not 16:00.
+    """
+    hours = _trading_hours(day)
+    return hours[1] if hours else None
+
+
 def session_of(moment: datetime) -> Session:
     """Which part of the New York trading day a moment falls in.
 

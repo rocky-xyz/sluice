@@ -105,6 +105,7 @@ sluice news collect --source all         # Yahoo Finance and Finnhub (needs FINN
 sluice news backfill                     # archive a year of Finnhub company news (resumable)
 sluice news resolve-links                # record where Finnhub's article links lead (resumable)
 sluice news import                       # rebuild the store from the raw archive
+sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
@@ -120,6 +121,16 @@ post-market or closed, from the NYSE calendar). Scheduled
 collection runs in a separate private data repository,
 cloned to `data/`; items collected by hand are archived under `data/local/` so
 they never conflict with it.
+
+`analyze` runs the pipeline for one ticker as of one trading day's close. So far
+the pipeline is its skeleton: news published before the close is fetched by
+code, a news analyst writes a report that cites each item by id, and a research
+manager gives a five-step rating with a confidence and an evidence list. Answers
+that cite an id that was never given are rejected and asked again. Model calls
+are cached in `data/local/llm_cache.db` and each run is checkpointed, so
+repeating a finished run costs nothing; `--out` writes the full run state as
+JSON. Models, prompts and limits live in `configs/pipeline/`, one file per
+version.
 
 API keys are read from the environment or from a local `.env` file; see
 `.env.example`. Further subcommands will be added as each roadmap step lands.

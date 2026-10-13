@@ -29,6 +29,77 @@ def main(
     load_dotenv()  # API keys live in a local .env; real environment variables win
 
 
+@app.command("analyze")
+def analyze(
+    ticker: Annotated[str, typer.Argument(help="Ticker to analyse.")],
+    day: Annotated[
+        str, typer.Option("--date", help="Decision day (YYYY-MM-DD); decides at its close.")
+    ],
+    config_version: Annotated[
+        str, typer.Option("--config", help="Pipeline config version under configs/pipeline/.")
+    ] = "v1",
+    repeat: Annotated[int, typer.Option("--repeat", help="Which repeat of this run.")] = 0,
+    db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write the full run state to this JSON file.")
+    ] = None,
+) -> None:
+    """Run the research pipeline for one ticker as of one trading day's close."""
+    import json
+    import os
+    from datetime import date
+
+    from sluice.agents.cache import CallCache
+    from sluice.agents.config import load_config
+    from sluice.agents.graph import Deps, build_graph, open_checkpointer, run
+    from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient
+    from sluice.agents.prefetch import backtest_decision_time
+    from sluice.agents.state import dump_state
+    from sluice.news.store import NewsStore
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    try:
+        decision_time = backtest_decision_time(date.fromisoformat(day))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--date") from exc
+    config = load_config(config_version)
+
+    checkpointer = open_checkpointer()
+    try:
+        with NewsStore(db) as store, CallCache() as cache:
+            llm = CachedLLM(cache, DeepSeekClient(key))
+            graph = build_graph(Deps(store, llm, config), checkpointer)
+            state = run(graph, config, ticker, decision_time, repeat=repeat)
+    finally:
+        checkpointer.conn.close()
+
+    saved = dump_state(state)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n")
+    meta, decision = state["meta"], state.get("decision")
+    console = Console()
+    console.print(f"{meta.run_id}  news items: {len(state['inputs'].news)}")
+    for call in state.get("usage", []):
+        source = "cache" if call.cached else "call"
+        console.print(
+            f"  {call.role} ({call.model}, {source}): "
+            f"{call.input_tokens} in, {call.output_tokens} out"
+        )
+    if decision is None:
+        typer.echo(f"Failed: {meta.failure}", err=True)
+        raise typer.Exit(code=1)
+    console.print(f"[bold]{decision.rating}[/bold]  confidence {decision.confidence:.2f}")
+    for evidence in decision.evidence:
+        console.print(f"  {evidence.direction}: {evidence.claim} {evidence.refs}", markup=False)
+    console.print(decision.rationale, markup=False)
+    for note in decision.notes:
+        console.print(f"note: {note}", markup=False)
+
+
 @news_app.command("collect")
 def news_collect(
     tickers: Annotated[

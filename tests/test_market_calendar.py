@@ -1,8 +1,8 @@
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from sluice.market_calendar import session_of
+from sluice.market_calendar import close_of, session_of
 from sluice.news.timeutil import ET
 
 
@@ -61,3 +61,10 @@ def test_early_close_moves_the_post_market(hour, minute, expected):
 def test_naive_datetime_is_rejected():
     with pytest.raises(ValueError):
         session_of(et(2026, 3, 2, 10).replace(tzinfo=None))
+
+
+def test_close_follows_early_closes_and_is_none_without_trading():
+    assert close_of(date(2026, 9, 30)) == datetime(2026, 9, 30, 20, 0, tzinfo=UTC)
+    assert close_of(date(2026, 1, 5)) == datetime(2026, 1, 5, 21, 0, tzinfo=UTC)  # winter time
+    assert close_of(date(2026, 11, 27)) == datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
+    assert close_of(date(2026, 10, 3)) is None

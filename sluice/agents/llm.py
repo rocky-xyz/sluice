@@ -12,9 +12,10 @@ from sluice.agents.cache import CallCache
 ENV_KEY = "DEEPSEEK_API_KEY"
 BASE_URL = "https://api.deepseek.com"
 TIMEOUT = 300  # seconds; the deep model can think for minutes
-# Retries per answer, shared by failed requests and answers that fail the caller's check.
+# Default retries per answer, shared by failed requests and answers that fail the caller's check.
 RETRIES = 2
-RETRY_WAITS = (2.0, 4.0)  # seconds before re-sending a failed request
+# Seconds before re-sending a failed request; the last one repeats when there are more retries.
+RETRY_WAITS = (2.0, 4.0)
 
 T = TypeVar("T")
 
@@ -23,6 +24,8 @@ class LLMError(RuntimeError):
     def __init__(self, message: str, retryable: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
+        # Answers received before giving up; they were paid for and belong in the usage record.
+        self.answers: list[LLMResponse] = []
 
 
 class Message(BaseModel):
@@ -151,9 +154,13 @@ class CachedLLM:
         return response
 
     def complete_checked(
-        self, request: LLMRequest, check: Callable[[LLMResponse], T], repeat: int = 0
+        self,
+        request: LLMRequest,
+        check: Callable[[LLMResponse], T],
+        repeat: int = 0,
+        retries: int = RETRIES,
     ) -> tuple[T, list[LLMResponse]]:
-        """Ask until `check` accepts an answer, with at most RETRIES retries in total.
+        """Ask until `check` accepts an answer, with at most `retries` retries in total.
 
         `check` turns an answer into what the caller needs and raises ValueError
         (pydantic's ValidationError is one) to reject it. Returns its result and
@@ -169,16 +176,19 @@ class CachedLLM:
             try:
                 response = self.complete(request, repeat, attempt)
             except LLMError as exc:
-                if not exc.retryable or failures == RETRIES:
+                if not exc.retryable or failures >= retries:
+                    exc.answers = answers
                     raise
-                self._sleep(RETRY_WAITS[failures])
+                self._sleep(RETRY_WAITS[min(failures, len(RETRY_WAITS) - 1)])
                 failures += 1
                 continue
             answers.append(response)
             try:
                 return check(response), answers
             except ValueError as exc:
-                if failures == RETRIES:
-                    raise LLMError(f"no acceptable answer after {attempt + 1} tries: {exc}") from exc
+                if failures >= retries:
+                    error = LLMError(f"no acceptable answer after {attempt + 1} tries: {exc}")
+                    error.answers = answers
+                    raise error from exc
                 failures += 1
                 attempt += 1

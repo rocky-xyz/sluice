@@ -253,3 +253,23 @@ def test_a_failure_that_cannot_pass_is_not_retried(cache):
         model.complete_checked(request(), parse)
     assert client.calls == 1
     assert waits == []
+
+
+def test_the_number_of_retries_can_be_set(cache):
+    model, client, _ = llm(cache, *["not json"] * 5)
+    with pytest.raises(LLMError):
+        model.complete_checked(request(), parse, retries=0)
+    assert client.calls == 1
+
+    busy = LLMError("HTTP 503", retryable=True)
+    model, client, waits = llm(cache, busy, busy, busy, GOOD)
+    verdict, _ = model.complete_checked(request("Another."), parse, retries=3)
+    assert verdict == Verdict(rating="hold")
+    assert waits == [RETRY_WAITS[0], RETRY_WAITS[1], RETRY_WAITS[1]]
+
+
+def test_giving_up_hands_back_the_answers_already_received(cache):
+    model, _, _ = llm(cache, "not json", "still not json", "nor this")
+    with pytest.raises(LLMError) as raised:
+        model.complete_checked(request(), parse)
+    assert [a.text for a in raised.value.answers] == ["not json", "still not json", "nor this"]
