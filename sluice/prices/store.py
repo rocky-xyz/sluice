@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -52,7 +53,9 @@ class PriceStore:
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Runs of a batch share this store from several threads.
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._lock = threading.RLock()
         if self._conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
             self._conn.execute("DROP TABLE IF EXISTS bars")
         self._conn.executescript(_SCHEMA)
@@ -71,9 +74,10 @@ class PriceStore:
         self.close()
 
     def latest(self, ticker: str) -> date | None:
-        row = self._conn.execute(
-            "SELECT max(day) FROM bars WHERE ticker = ?", (canonical(ticker),)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT max(day) FROM bars WHERE ticker = ?", (canonical(ticker),)
+            ).fetchone()
         return date.fromisoformat(row[0]) if row[0] else None
 
     def replace(self, ticker: str, bars: list[Bar]) -> None:
@@ -83,7 +87,7 @@ class PriceStore:
         new rows must never be mixed.
         """
         symbol = canonical(ticker)
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute("DELETE FROM bars WHERE ticker = ?", (symbol,))
             self._conn.executemany(
                 "INSERT INTO bars (ticker, day, close, raw_close, volume) VALUES (?, ?, ?, ?, ?)",
@@ -100,19 +104,22 @@ class PriceStore:
         ends before `through`, the series is fetched again first; only sessions
         that had closed by then are kept, so a half-finished day is never stored.
         """
-        latest = self.latest(ticker)
-        if self._fetch is not None and (latest is None or latest < through):
-            now = self._now()
-            fetched = self._fetch(canonical(ticker), HISTORY_START)
-            finished = [bar for bar in fetched if (close := close_of(bar.day)) and close <= now]
-            if finished:
-                self.replace(ticker, finished)
-        rows = self._conn.execute(
-            "SELECT day, close, raw_close, volume FROM bars WHERE ticker = ? AND day <= ?"
-            " ORDER BY day DESC LIMIT ?",
-            (canonical(ticker), through.isoformat(), limit),
-        ).fetchall()
-        return [
-            Bar(day=day, close=close, raw_close=raw, volume=volume)
-            for day, close, raw, volume in reversed(rows)
-        ]
+        with self._lock:  # also keeps two threads from fetching the same series
+            latest = self.latest(ticker)
+            if self._fetch is not None and (latest is None or latest < through):
+                now = self._now()
+                fetched = self._fetch(canonical(ticker), HISTORY_START)
+                finished = [
+                    bar for bar in fetched if (close := close_of(bar.day)) and close <= now
+                ]
+                if finished:
+                    self.replace(ticker, finished)
+            rows = self._conn.execute(
+                "SELECT day, close, raw_close, volume FROM bars WHERE ticker = ? AND day <= ?"
+                " ORDER BY day DESC LIMIT ?",
+                (canonical(ticker), through.isoformat(), limit),
+            ).fetchall()
+            return [
+                Bar(day=day, close=close, raw_close=raw, volume=volume)
+                for day, close, raw, volume in reversed(rows)
+            ]

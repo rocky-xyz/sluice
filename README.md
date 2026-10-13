@@ -108,6 +108,7 @@ sluice news import                       # rebuild the store from the raw archiv
 sluice fundamentals fetch                # quarterly statements from Alpha Vantage (resumable; 25 calls a day)
 sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
 sluice analyze TSLA                      # or as of now, for any ticker: collects its news first
+sluice batch                             # backtest the universe on every tenth trading day (resumable)
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
@@ -143,6 +144,17 @@ are cached in `data/local/llm_cache.db` and each run is checkpointed, so
 repeating a finished run costs nothing; `--out` writes the full run state as
 JSON. Models, prompts and limits live in `configs/pipeline/`, one file per
 version.
+
+`batch` runs the backtest over a grid: by default the eleven companies of the
+universe on every tenth trading day since 2026-01-02, four runs at a time. Runs
+are independent of each other, so neither their order nor the number of workers
+changes a result. Each run's full state is saved as JSON under
+`data/local/runs/<config>-<digest>/<ticker>/`, next to a `ratings.jsonl` with
+one line per run (rating, confidence, gaps, tokens). A finished run is never
+paid for twice: rerunning the command resumes what broke off and returns the
+rest from checkpoints. It refuses to start while statements or prices are
+missing for a ticker, because such a run would finish with a gap and stay that
+way.
 
 Daily prices come from Yahoo Finance and are kept in `data/local/prices.db`; a
 ticker is fetched the first time it is needed. A day's bar counts only once its

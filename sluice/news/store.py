@@ -79,7 +79,8 @@ class NewsStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        # A pipeline run may read from a worker thread; each run has its own store.
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]

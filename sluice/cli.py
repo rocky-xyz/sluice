@@ -138,6 +138,123 @@ def analyze(
         console.print(f"note: {note}", markup=False)
 
 
+@app.command("batch")
+def batch(
+    tickers: Annotated[
+        str, typer.Option("--tickers", help="Comma-separated tickers to run.")
+    ] = ",".join(COMPANIES),
+    start: Annotated[
+        str | None, typer.Option("--from", help="First decision day or later (YYYY-MM-DD).")
+    ] = None,
+    end: Annotated[
+        str | None,
+        typer.Option(
+            "--to", help="Last decision day or earlier. Default: the last closed session."
+        ),
+    ] = None,
+    every: Annotated[
+        int, typer.Option("--every", help="Trading days between decision days.")
+    ] = 10,
+    repeats: Annotated[int, typer.Option("--repeats", help="Runs per ticker and day.")] = 1,
+    workers: Annotated[int, typer.Option("--workers", help="Runs going on at a time.")] = 4,
+    config_version: Annotated[
+        str, typer.Option("--config", help="Pipeline config version under configs/pipeline/.")
+    ] = "v1",
+    db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", help="Where run states and the ratings file go.")
+    ] = Path("data/local/runs"),
+    allow_gaps: Annotated[
+        bool, typer.Option("--allow-gaps", help="Run even when statements or prices are missing.")
+    ] = False,
+) -> None:
+    """Backtest a grid of tickers and decision days. Interrupt and rerun freely: it resumes."""
+    import os
+    from datetime import UTC, date, datetime
+
+    from rich.progress import Progress
+
+    from sluice.agents import batch as batching
+    from sluice.agents.cache import CallCache
+    from sluice.agents.config import load_config
+    from sluice.agents.graph import Deps, build_graph, open_checkpointer
+    from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient
+    from sluice.fundamentals.store import FundamentalsStore
+    from sluice.market_calendar import last_closed_session
+    from sluice.news.store import NewsStore
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    config = load_config(config_version)
+    first = date.fromisoformat(start) if start else batching.FIRST_DAY
+    last = date.fromisoformat(end) if end else last_closed_session(datetime.now(UTC))
+    days = batching.decision_days(first, last, every)
+    cells = batching.grid([t for t in tickers.split(",") if t.strip()], days, repeats)
+    if not cells:
+        typer.echo("Nothing to run: no decision day in that range.", err=True)
+        raise typer.Exit(code=2)
+
+    statements = FundamentalsStore()
+    checkpointer = open_checkpointer()
+    opened: list[NewsStore] = []
+    console = Console()
+    try:
+        with PriceStore(fetch=fetch_bars) as prices, CallCache() as cache:
+            problems = batching.unprepared(cells, statements, prices, config.prices.benchmark)
+            for problem in problems:
+                typer.echo(f"Not ready: {problem}", err=True)
+            if problems and not allow_gaps:
+                typer.echo("Fix these or pass --allow-gaps.", err=True)
+                raise typer.Exit(code=2)
+            llm = CachedLLM(cache, DeepSeekClient(key))
+
+            def make_graph():
+                # One news store per worker: its connection serves one run at a time.
+                store = NewsStore(db)
+                opened.append(store)
+                return build_graph(Deps(store, prices, statements, llm, config), checkpointer)
+
+            console.print(
+                f"{len(cells)} runs: {len({c.ticker for c in cells})} tickers, {len(days)} days "
+                f"({days[0]} .. {days[-1]}), config {config.version}-{config.digest}"
+            )
+            with Progress(console=console) as bar:
+                task = bar.add_task("running", total=len(cells))
+
+                def on_done(result: batching.CellResult) -> None:
+                    if result.status != "ok":
+                        bar.console.print(
+                            f"{result.status}: {result.ticker} {result.day} r{result.repeat}: "
+                            f"{result.failure}",
+                            markup=False,
+                        )
+                    bar.advance(task)
+
+                results = batching.run_batch(cells, config, make_graph, out_dir, workers, on_done)
+    finally:
+        for store in opened:
+            store.close()
+        checkpointer.conn.close()
+
+    counts = {
+        status: sum(r.status == status for r in results) for status in ("ok", "failed", "error")
+    }
+    totals, cost = batching.estimated_cost(results)
+    console.print(f"ok {counts['ok']}, failed {counts['failed']}, broke off {counts['error']}")
+    for model, (used_in, used_out) in sorted(totals.items()):
+        console.print(f"  {model}: {used_in:,} in, {used_out:,} out")
+    console.print(f"  about ${cost:.2f} at peak list prices if nothing had been cached")
+    console.print(f"results in {batching.run_dir(out_dir, config)}")
+    if counts["error"]:
+        typer.echo("Some runs broke off. Rerun to continue.", err=True)
+    if counts["error"] or counts["failed"]:
+        raise typer.Exit(code=1)
+
+
 @fundamentals_app.command("fetch")
 def fundamentals_fetch(
     tickers: Annotated[
