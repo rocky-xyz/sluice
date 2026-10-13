@@ -132,6 +132,13 @@ repeating a finished run costs nothing; `--out` writes the full run state as
 JSON. Models, prompts and limits live in `configs/pipeline/`, one file per
 version.
 
+Daily prices come from Yahoo Finance and are kept in `data/local/prices.db`; a
+ticker is fetched the first time it is needed. A day's bar counts only once its
+session has closed, so a run at the close of day T sees T's bar and nothing
+later. From them the code computes ratio-only indicators (trailing and excess
+returns, volatility, distance from moving averages, RSI, relative volume) and
+stores them in the run state; the analyst that reads them comes next.
+
 API keys are read from the environment or from a local `.env` file; see
 `.env.example`. Further subcommands will be added as each roadmap step lands.
 

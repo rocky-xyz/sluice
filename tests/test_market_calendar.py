@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from sluice.market_calendar import close_of, session_of
+from sluice.market_calendar import close_of, last_closed_session, session_of
 from sluice.news.timeutil import ET
 
 
@@ -68,3 +68,18 @@ def test_close_follows_early_closes_and_is_none_without_trading():
     assert close_of(date(2026, 1, 5)) == datetime(2026, 1, 5, 21, 0, tzinfo=UTC)  # winter time
     assert close_of(date(2026, 11, 27)) == datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
     assert close_of(date(2026, 10, 3)) is None
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected"),
+    [
+        (datetime(2026, 9, 30, 20, 0, tzinfo=UTC), date(2026, 9, 30)),  # at the close
+        (datetime(2026, 9, 30, 19, 59, 59, tzinfo=UTC), date(2026, 9, 29)),  # a second before
+        (datetime(2026, 10, 3, 15, 0, tzinfo=UTC), date(2026, 10, 2)),  # Saturday
+        (datetime(2026, 10, 5, 12, 0, tzinfo=UTC), date(2026, 10, 2)),  # Monday before the open
+        (datetime(2026, 11, 27, 18, 0, tzinfo=UTC), date(2026, 11, 27)),  # early close
+        (datetime(2026, 11, 27, 3, 0, tzinfo=UTC), date(2026, 11, 25)),  # Thanksgiving night, UTC
+    ],
+)
+def test_last_closed_session(moment, expected):
+    assert last_closed_session(moment) == expected

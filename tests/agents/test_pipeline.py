@@ -7,12 +7,19 @@ from pathlib import Path
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from sluice.agents import indicators
 from sluice.agents.cache import CallCache
-from sluice.agents.config import NewsConfig, PipelineConfig, load_config
+from sluice.agents.config import NewsConfig, PipelineConfig, PricesConfig, load_config
 from sluice.agents.graph import Deps, build_graph, open_checkpointer, run
 from sluice.agents.llm import CachedLLM, LLMError, LLMRequest, LLMResponse
-from sluice.agents.prefetch import backtest_decision_time, prefetch, select_news
+from sluice.agents.prefetch import (
+    backtest_decision_time,
+    prefetch_news,
+    prefetch_prices,
+    select_news,
+)
 from sluice.agents.state import (
+    Gap,
     Meta,
     cited_refs,
     dump_state,
@@ -21,6 +28,8 @@ from sluice.agents.state import (
 )
 from sluice.news.models import NewsItem
 from sluice.news.store import NewsStore
+from sluice.prices.store import PriceStore
+from tests.prices.series import series
 
 DAY = date(2026, 9, 30)
 CLOSE = datetime(2026, 9, 30, 20, 0, tzinfo=UTC)  # 16:00 Eastern
@@ -31,6 +40,7 @@ CONFIG = PipelineConfig(
     temperature=0.0,
     retries=2,
     models={"news_analyst": "fast-model", "research_manager": "deep-model"},
+    prices=PricesConfig(lookback_days=250, benchmark="SPY"),
     news=NEWS,
     prompts={"news_analyst": "You are the news analyst.", "research_manager": "You decide."},
 )
@@ -105,7 +115,12 @@ class FakeModel:
 def pipeline(store, tmp_path, model, cache_name="llm.db", checkpoints=True):
     cache = CallCache(tmp_path / cache_name)
     saver = open_checkpointer(tmp_path / "checkpoints.db") if checkpoints else None
-    return build_graph(Deps(store, CachedLLM(cache, model, sleep=lambda _: None), CONFIG), saver)
+    prices = PriceStore(tmp_path / "prices.db")
+    if prices.latest("NVDA") is None:
+        prices.replace("NVDA", series(DAY, 260, drift=0.002))
+        prices.replace("SPY", series(DAY, 260, drift=0.001))
+    llm = CachedLLM(cache, model, sleep=lambda _: None)
+    return build_graph(Deps(store, prices, llm, CONFIG), saver)
 
 
 def go(graph, repeat=0):
@@ -134,28 +149,28 @@ def test_a_day_without_trading_is_refused(day):
 
 
 def test_nothing_published_at_or_after_the_decision_time_is_fetched(stocked):
-    inputs = prefetch(stocked, "NVDA", CLOSE, NEWS)
-    assert [item.title for item in inputs.news] == ["Chipmaker headline 1", "Chipmaker headline 2"]
-    assert all(item.published_at < CLOSE for item in inputs.news)
-    assert inputs.gaps == []
+    news, gaps = prefetch_news(stocked, "NVDA", CLOSE, NEWS)
+    assert [item.title for item in news] == ["Chipmaker headline 1", "Chipmaker headline 2"]
+    assert all(item.published_at < CLOSE for item in news)
+    assert gaps == []
 
 
 def test_news_older_than_the_lookback_is_left_out(store):
     store.add([article(1, CLOSE - timedelta(days=14, seconds=1)), article(2, CLOSE - timedelta(days=14))])
-    assert [item.title for item in prefetch(store, "NVDA", CLOSE, NEWS).news] == ["Chipmaker headline 2"]
+    news, _ = prefetch_news(store, "NVDA", CLOSE, NEWS)
+    assert [item.title for item in news] == ["Chipmaker headline 2"]
 
 
 def test_each_item_is_numbered_by_its_store_id(stocked):
-    inputs = prefetch(stocked, "NVDA", CLOSE, NEWS)
+    news, _ = prefetch_news(stocked, "NVDA", CLOSE, NEWS)
     stored = {f"N{item.id}": item.title for item in stocked.query("NVDA", before=CLOSE)}
-    assert {item.ref: item.title for item in inputs.news} == stored
-    assert inputs.refs() == set(stored)
+    assert {item.ref: item.title for item in news} == stored
 
 
 def test_no_news_is_recorded_as_a_gap(store):
-    inputs = prefetch(store, "NVDA", CLOSE, NEWS)
-    assert inputs.news == []
-    assert [gap.kind for gap in inputs.gaps] == ["news"]
+    news, gaps = prefetch_news(store, "NVDA", CLOSE, NEWS)
+    assert news == []
+    assert [gap.kind for gap in gaps] == ["news"]
 
 
 def test_over_the_cap_the_most_reprinted_then_most_recent_are_kept(store):
@@ -212,6 +227,7 @@ def test_the_shipped_config_loads():
     config = load_config("v1", Path(__file__).parents[2] / "configs")
     assert config.version == "v1"
     assert set(config.models) == set(config.prompts) == {"news_analyst", "research_manager"}
+    assert (config.prices.lookback_days, config.prices.benchmark) == (250, "SPY")
     assert (config.temperature, config.retries) == (0.0, 2)
     assert (config.news.lookback_days, config.news.max_items) == (14, 50)
 
@@ -399,3 +415,119 @@ def test_the_saved_state_has_all_six_layers(stocked, tmp_path):
     assert json.loads(json.dumps(saved)) == saved
     assert saved["meta"]["decision_time"] == "2026-09-30T20:00:00Z"
     assert saved["debate"] == []
+
+
+# --- prices ---
+
+PRICES = CONFIG.prices
+NOON = datetime(2026, 9, 30, 16, 0, tzinfo=UTC)  # 12:00 Eastern, the session still open
+DAY_BEFORE = date(2026, 9, 29)
+
+
+@pytest.fixture
+def prices(tmp_path):
+    with PriceStore(tmp_path / "prices.db") as prices:
+        prices.replace("NVDA", series(date(2026, 10, 9), 267, drift=0.002))
+        prices.replace("SPY", series(date(2026, 10, 9), 267, drift=0.001))
+        yield prices
+
+
+def test_a_backtest_at_the_close_uses_that_days_bar(prices):
+    shown, as_of, gaps = prefetch_prices(prices, "NVDA", CLOSE, PRICES)
+    assert as_of == DAY
+    assert [item.name for item in shown] == list(indicators.NAMES)
+    assert all(item.ref == f"P:{item.name}" for item in shown)
+    assert gaps == []
+
+
+def test_during_trading_hours_the_last_finished_day_is_used(prices):
+    _, as_of, _ = prefetch_prices(prices, "NVDA", NOON, PRICES)
+    assert as_of == DAY_BEFORE
+
+
+def test_changing_every_later_price_changes_no_indicator(prices):
+    before = prefetch_prices(prices, "NVDA", CLOSE, PRICES)
+    for ticker in ("NVDA", "SPY"):
+        bars = prices.history(ticker, date(2026, 10, 9), limit=1000)
+        prices.replace(
+            ticker,
+            [
+                bar if bar.day <= DAY else bar.model_copy(update={"close": 1.0, "volume": 9e9})
+                for bar in bars
+            ],
+        )
+    assert prefetch_prices(prices, "NVDA", CLOSE, PRICES) == before
+
+    # and the check has teeth: changing the decision day's own bar does change them
+    bars = prices.history("NVDA", date(2026, 10, 9), limit=1000)
+    prices.replace(
+        "NVDA", [bar if bar.day != DAY else bar.model_copy(update={"close": 1.0}) for bar in bars]
+    )
+    assert prefetch_prices(prices, "NVDA", CLOSE, PRICES) != before
+
+
+def test_indicators_match_the_formulas_on_the_visible_bars(prices):
+    shown, _, _ = prefetch_prices(prices, "NVDA", CLOSE, PRICES)
+    values = {item.name: item.value for item in shown}
+    own = prices.history("NVDA", DAY, limit=250)
+    index = prices.history("SPY", DAY, limit=250)
+
+    assert len(own) == 250
+    assert values["ret_5d"] == round(own[-1].close / own[-6].close - 1, 4)
+    expected = (own[-1].close / own[-21].close) - (index[-1].close / index[-21].close)
+    assert values["excess_20d"] == round(expected, 4)
+
+
+def test_no_price_level_is_shown(prices):
+    shown, _, _ = prefetch_prices(prices, "NVDA", CLOSE, PRICES)
+    closes = {round(bar.close, 4) for bar in prices.history("NVDA", DAY, limit=250)}
+    assert not closes & {item.value for item in shown}
+
+
+def test_a_short_history_is_used_as_far_as_it_goes_and_the_rest_is_a_gap(tmp_path):
+    with PriceStore(tmp_path / "short.db") as short:
+        short.replace("NEWCO", series(DAY, 30))
+        short.replace("SPY", series(DAY, 250))
+        shown, _, gaps = prefetch_prices(short, "NEWCO", CLOSE, PRICES)
+
+    assert {item.name for item in shown} == {
+        "ret_5d", "ret_20d", "excess_5d", "excess_20d", "vol_20d", "rsi_14", "volume_ratio_20d",
+    }  # fmt: skip
+    assert [gap.reason for gap in gaps] == [
+        "could not compute: ret_60d, excess_60d, vs_sma50, vs_sma200"
+    ]
+
+
+def test_no_prices_and_stale_prices_are_gaps(tmp_path):
+    with PriceStore(tmp_path / "gaps.db") as store:
+        assert prefetch_prices(store, "NVDA", CLOSE, PRICES) == (
+            [], None, [Gap(kind="prices", reason="no price history")],
+        )  # fmt: skip
+        store.replace("NVDA", series(DAY_BEFORE, 250))
+        store.replace("SPY", series(DAY_BEFORE, 250))
+        _, as_of, gaps = prefetch_prices(store, "NVDA", CLOSE, PRICES)
+    assert as_of == DAY_BEFORE
+    assert gaps[0].reason == "prices end on 2026-09-29, before the last closed session 2026-09-30"
+
+
+def test_the_benchmark_itself_has_no_excess_return_and_no_gap(prices):
+    shown, _, gaps = prefetch_prices(prices, "SPY", CLOSE, PRICES)
+    assert not any(item.name.startswith("excess_") for item in shown)
+    assert len(shown) == len(indicators.NAMES) - 3
+    assert gaps == []
+
+
+def test_the_run_snapshot_holds_the_indicators_but_the_news_analyst_cannot_cite_them(
+    stocked, tmp_path
+):
+    model = FakeModel(analyst=["Momentum is strong [P:ret_5d].", "Demand is strong [N1]."])
+    state = go(pipeline(stocked, tmp_path, model))
+
+    assert state["inputs"].prices_as_of == DAY
+    assert len(state["inputs"].prices) == len(indicators.NAMES)
+    assert "P:ret_5d" in state["inputs"].refs()
+    assert len(model.asked("fast-model")) == 2
+    assert "ret_5d" not in model.requests[0].messages[1].content
+    assert dump_state(state)["inputs"]["prices"][0] == {
+        "ref": "P:ret_5d", "name": "ret_5d", "value": state["inputs"].prices[0].value,
+    }  # fmt: skip

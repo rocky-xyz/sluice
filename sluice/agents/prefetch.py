@@ -1,10 +1,15 @@
 from datetime import date, datetime, timedelta
 
-from sluice.agents.config import NewsConfig
-from sluice.agents.state import Gap, Inputs, NewsInput
-from sluice.market_calendar import close_of
+from sluice.agents import indicators
+from sluice.agents.config import NewsConfig, PipelineConfig, PricesConfig
+from sluice.agents.state import Gap, Inputs, NewsInput, PriceInput
+from sluice.market_calendar import close_of, last_closed_session
 from sluice.news.models import StoredNews
 from sluice.news.store import NewsStore
+from sluice.prices.store import PriceStore
+from sluice.universe import canonical
+
+VALUE_DIGITS = 4  # indicators are rounded so that float noise cannot change a prompt
 
 
 def backtest_decision_time(day: date) -> datetime:
@@ -18,36 +23,93 @@ def backtest_decision_time(day: date) -> datetime:
     return close
 
 
+def prefetch_prices(
+    prices: PriceStore, ticker: str, decision_time: datetime, config: PricesConfig
+) -> tuple[list[PriceInput], date | None, list[Gap]]:
+    """Indicators on the last trading day that had closed by the decision time.
+
+    A day's bar counts only once its session is over, so a backtest at the close
+    of T uses T's bar and nothing later, and a run during trading hours uses the
+    previous day's.
+    """
+    through = last_closed_session(decision_time)
+    bars = prices.history(ticker, through, config.lookback_days)
+    if not bars:
+        return [], None, [Gap(kind="prices", reason="no price history")]
+
+    gaps = []
+    as_of = bars[-1].day
+    if as_of < through:
+        reason = f"prices end on {as_of}, before the last closed session {through}"
+        gaps.append(Gap(kind="prices", reason=reason))
+    benchmark = canonical(config.benchmark)
+    reference = (
+        None  # the benchmark has no excess return over itself
+        if canonical(ticker) == benchmark
+        else prices.history(benchmark, as_of, config.lookback_days)
+    )
+    values = indicators.compute(bars, reference)
+    expected = [
+        name for name in indicators.NAMES if reference is not None or not name.startswith("excess_")
+    ]
+    if missing := [name for name in expected if name not in values]:
+        gaps.append(Gap(kind="prices", reason=f"could not compute: {', '.join(missing)}"))
+    shown = [
+        PriceInput(ref=f"P:{name}", name=name, value=round(values[name], VALUE_DIGITS))
+        for name in indicators.NAMES
+        if name in values
+    ]
+    return shown, as_of, gaps
+
+
 def select_news(items: list[StoredNews], max_items: int) -> list[StoredNews]:
     """At most `max_items`: the most reprinted, then the most recent. Returned oldest first."""
     ranked = sorted(items, key=lambda item: (item.reprint_count, item.published_at), reverse=True)
     return sorted(ranked[:max_items], key=lambda item: (item.published_at, item.id))
 
 
-def prefetch(
-    store: NewsStore, ticker: str, decision_time: datetime, news: NewsConfig
-) -> Inputs:
-    """Everything the analysts will see, none of it published at or after the decision time.
+def prefetch_news(
+    store: NewsStore, ticker: str, decision_time: datetime, config: NewsConfig
+) -> tuple[list[NewsInput], list[Gap]]:
+    """News published before the decision time.
 
     The cut-off is applied by the store's query, which also counts reprints as
     of the decision time.
     """
-    since = decision_time - timedelta(days=news.lookback_days)
+    since = decision_time - timedelta(days=config.lookback_days)
     found = store.query(ticker, before=decision_time, since=since)
     if not found:
-        reason = f"no items in the {news.lookback_days} days before the decision time"
-        return Inputs(gaps=[Gap(kind="news", reason=reason)])
+        reason = f"no items in the {config.lookback_days} days before the decision time"
+        return [], [Gap(kind="news", reason=reason)]
+    return [
+        NewsInput(
+            ref=f"N{item.id}",
+            title=item.title,
+            summary=item.summary,
+            publisher=item.publisher,
+            published_at=item.published_at,
+            session=item.session,
+            reprint_count=item.reprint_count,
+        )
+        for item in select_news(found, config.max_items)
+    ], []
+
+
+def prefetch(
+    store: NewsStore,
+    prices: PriceStore,
+    ticker: str,
+    decision_time: datetime,
+    config: PipelineConfig,
+) -> Inputs:
+    """Everything the analysts will see, none of it from at or after the decision time."""
+    indicators_shown, as_of, price_gaps = prefetch_prices(
+        prices, ticker, decision_time, config.prices
+    )
+    news, news_gaps = prefetch_news(store, ticker, decision_time, config.news)
     return Inputs(
-        news=[
-            NewsInput(
-                ref=f"N{item.id}",
-                title=item.title,
-                summary=item.summary,
-                publisher=item.publisher,
-                published_at=item.published_at,
-                session=item.session,
-                reprint_count=item.reprint_count,
-            )
-            for item in select_news(found, news.max_items)
-        ]
+        prices=indicators_shown,
+        prices_as_of=as_of,
+        news=news,
+        gaps=[*price_gaps, *news_gaps],
     )

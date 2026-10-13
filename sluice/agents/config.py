@@ -14,6 +14,13 @@ class NewsConfig(BaseModel):
     max_items: int = Field(gt=0)
 
 
+class PricesConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    lookback_days: int = Field(gt=0)  # trading days of history the indicators are computed on
+    benchmark: str = Field(min_length=1)
+
+
 class PipelineConfig(BaseModel):
     """One version of everything about the pipeline that may be changed and compared."""
 
@@ -24,6 +31,7 @@ class PipelineConfig(BaseModel):
     temperature: float = Field(ge=0)
     retries: int = Field(ge=0)
     models: dict[str, str]  # role -> model
+    prices: PricesConfig
     news: NewsConfig
     prompts: dict[str, str]  # role -> system prompt
 

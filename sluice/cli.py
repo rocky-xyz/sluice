@@ -56,6 +56,8 @@ def analyze(
     from sluice.agents.prefetch import backtest_decision_time
     from sluice.agents.state import dump_state
     from sluice.news.store import NewsStore
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
 
     key = os.environ.get(ENV_KEY, "").strip()
     if not key:
@@ -69,9 +71,9 @@ def analyze(
 
     checkpointer = open_checkpointer()
     try:
-        with NewsStore(db) as store, CallCache() as cache:
+        with NewsStore(db) as store, PriceStore(fetch=fetch_bars) as prices, CallCache() as cache:
             llm = CachedLLM(cache, DeepSeekClient(key))
-            graph = build_graph(Deps(store, llm, config), checkpointer)
+            graph = build_graph(Deps(store, prices, llm, config), checkpointer)
             state = run(graph, config, ticker, decision_time, repeat=repeat)
     finally:
         checkpointer.conn.close()
@@ -82,7 +84,11 @@ def analyze(
         out.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n")
     meta, decision = state["meta"], state.get("decision")
     console = Console()
-    console.print(f"{meta.run_id}  news items: {len(state['inputs'].news)}")
+    inputs = state["inputs"]
+    console.print(
+        f"{meta.run_id}  price indicators: {len(inputs.prices)} (as of {inputs.prices_as_of}), "
+        f"news items: {len(inputs.news)}"
+    )
     for call in state.get("usage", []):
         source = "cache" if call.cached else "call"
         console.print(

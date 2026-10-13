@@ -41,6 +41,17 @@ def close_of(day: date) -> datetime | None:
     return hours[1] if hours else None
 
 
+def last_closed_session(moment: datetime) -> date:
+    """The latest New York trading day whose regular session had ended by `moment`."""
+    moment = to_utc(moment)
+    day = moment.astimezone(ET).date()
+    while True:
+        close = close_of(day)
+        if close is not None and close <= moment:
+            return day
+        day -= timedelta(days=1)
+
+
 def session_of(moment: datetime) -> Session:
     """Which part of the New York trading day a moment falls in.
 

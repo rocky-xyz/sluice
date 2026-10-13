@@ -1,6 +1,6 @@
 import operator
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal, TypedDict
 
 from pydantic import AwareDatetime, BaseModel, Field
@@ -42,19 +42,29 @@ class NewsInput(BaseModel):
     reprint_count: int
 
 
+class PriceInput(BaseModel):
+    """One price indicator exactly as the market analyst will see it."""
+
+    ref: str  # "P:" + the indicator's name
+    name: str
+    value: float
+
+
 class Gap(BaseModel):
     kind: GapKind
     reason: str
 
 
 class Inputs(BaseModel):
-    """Snapshot of everything pre-fetched for the run. Prices and fundamentals join in task 2.4."""
+    """Snapshot of everything pre-fetched for the run. Fundamentals join in task 2.5."""
 
+    prices: list[PriceInput] = []
+    prices_as_of: date | None = None  # the trading day the indicators are computed on
     news: list[NewsInput] = []
     gaps: list[Gap] = []
 
     def refs(self) -> set[str]:
-        return {item.ref for item in self.news}
+        return {item.ref for item in (*self.prices, *self.news)}
 
 
 class Report(BaseModel):
@@ -120,7 +130,7 @@ class PipelineState(TypedDict, total=False):
 
 
 # Every class stored in a channel; the checkpointer needs the list to read them back.
-STATE_MODELS = (Meta, NewsInput, Gap, Inputs, Report, Turn, Evidence, Decision, Call)
+STATE_MODELS = (Meta, PriceInput, NewsInput, Gap, Inputs, Report, Turn, Evidence, Decision, Call)
 
 
 def make_run_id(

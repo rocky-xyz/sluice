@@ -15,6 +15,7 @@ from sluice.agents.llm import CachedLLM
 from sluice.agents.prefetch import prefetch
 from sluice.agents.state import STATE_MODELS, Meta, PipelineState, RunMode, make_run_id
 from sluice.news.store import NewsStore
+from sluice.prices.store import PriceStore
 from sluice.universe import canonical
 
 DEFAULT_CHECKPOINTS = Path("data/local/checkpoints.db")
@@ -25,6 +26,7 @@ class Deps:
     """What the nodes need besides the state."""
 
     store: NewsStore
+    prices: PriceStore
     llm: CachedLLM
     config: PipelineConfig
 
@@ -40,7 +42,7 @@ def build_graph(
 
     def prefetch_node(state: PipelineState) -> dict:
         meta = state["meta"]
-        inputs = prefetch(deps.store, meta.ticker, meta.decision_time, deps.config.news)
+        inputs = prefetch(deps.store, deps.prices, meta.ticker, meta.decision_time, deps.config)
         return {"inputs": inputs}
 
     def news_analyst_node(state: PipelineState) -> dict:

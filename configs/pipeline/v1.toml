@@ -7,6 +7,10 @@ retries = 2  # per answer; shared by failed requests and answers that fail valid
 news_analyst = "deepseek-flash"
 research_manager = "deepseek-v4-pro"
 
+[prices]
+lookback_days = 250  # trading days
+benchmark = "SPY"  # excess returns are measured against it
+
 [news]
 lookback_days = 14  # one decision period
 max_items = 50  # one per reprint group; most reprinted first, then most recent

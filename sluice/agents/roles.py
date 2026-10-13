@@ -82,7 +82,7 @@ def news_analyst(state: PipelineState, llm: CachedLLM, config: PipelineConfig) -
     if not inputs.news:
         return {"reports": {key: Report(text="No news was available.", no_data=True)}}
 
-    known = inputs.refs()
+    known = {item.ref for item in inputs.news}  # the only sources this analyst was shown
 
     def check(answer: LLMResponse) -> Report:
         text = answer.text.strip()
