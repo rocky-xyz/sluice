@@ -16,6 +16,7 @@ from sluice.news.archive import (
     import_files,
 )
 from sluice.news.models import NewsItem
+from sluice.news.publishers import publisher_for
 from sluice.news.store import NewsStore
 from sluice.news.timeutil import ET
 from sluice.universe import canonical
@@ -111,11 +112,15 @@ def _published_at(raw: dict) -> datetime | None:
     return stamped
 
 
-def parse_item(raw: dict, ticker: str, fetched_at: datetime) -> NewsItem | None:
+def parse_item(
+    raw: dict, ticker: str, fetched_at: datetime, location: str | None = None
+) -> NewsItem | None:
     """Turn one raw item into a NewsItem, or None when it has no headline.
 
-    Finnhub's "source" is the publisher, except for aggregators, which leave the
-    publisher unknown. "url" is a Finnhub redirect to the article.
+    Finnhub's "source" is the publisher, except for aggregators. For those the
+    publisher is read from `location`, the address the article's link leads to,
+    when it is known and is the publisher's own site. "url" stays the Finnhub
+    redirect: it identifies the article whether or not its link was followed.
     """
     title = (raw.get("headline") or "").strip()
     if not title:
@@ -125,7 +130,11 @@ def parse_item(raw: dict, ticker: str, fetched_at: datetime) -> NewsItem | None:
         title=title,
         url=raw.get("url") or None,
         summary=raw.get("summary") or None,
-        publisher=None if raw.get("source") in AGGREGATORS else raw.get("source") or None,
+        publisher=(
+            publisher_for(location)
+            if raw.get("source") in AGGREGATORS
+            else raw.get("source") or None
+        ),
         source=SOURCE,
         tickers=[canonical(ticker)],
         published_at=published_at,
@@ -147,7 +156,14 @@ def archive(raw_dir: Path, ticker: str, fetched_at: datetime, items: Iterable[di
 
 
 def import_archive(raw_dir: Path, store: NewsStore) -> ImportResult:
-    return import_files(archive_files(raw_dir, SOURCE), parse_item, store)
+    from sluice.news.finnhub_links import load_links
+
+    links = load_links(raw_dir)
+
+    def parse(raw: dict, ticker: str, fetched_at: datetime) -> NewsItem | None:
+        return parse_item(raw, ticker, fetched_at, links.get(raw.get("id")))
+
+    return import_files(archive_files(raw_dir, SOURCE), parse, store)
 
 
 def collect(

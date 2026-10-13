@@ -135,6 +135,12 @@ class NewsStore:
                     )
                 else:
                     result.skipped += 1
+                    # A later copy may know what the first did not. It fills gaps, never overwrites.
+                    self._conn.execute(
+                        "UPDATE articles SET publisher = COALESCE(publisher, ?),"
+                        " summary = COALESCE(summary, ?) WHERE id = ?",
+                        (item.publisher, item.summary, article_id),
+                    )
                 self._conn.executemany(
                     "INSERT OR IGNORE INTO article_tickers (article_id, ticker) VALUES (?, ?)",
                     [(article_id, ticker) for ticker in item.tickers],

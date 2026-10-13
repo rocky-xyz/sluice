@@ -103,12 +103,15 @@ sluice news collect                      # fetch recent Yahoo Finance news for t
 sluice news collect --tickers NVDA,AMD   # or for chosen tickers
 sluice news collect --source all         # Yahoo Finance and Finnhub (needs FINNHUB_API_KEY)
 sluice news backfill                     # archive a year of Finnhub company news (resumable)
+sluice news resolve-links                # record where Finnhub's article links lead (resumable)
 sluice news import                       # rebuild the store from the raw archive
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
 responses as JSONL. `news backfill` archives history from Finnhub, one ticker
-and one day per request, and resumes where it stopped. `news import` loads
+and one day per request, and resumes where it stopped. `news resolve-links`
+follows Finnhub's redirect links to learn the original address, and with it the
+publisher, of articles that Finnhub only attributes to an aggregator. `news import` loads
 archived items from every source into the store, so the database can always be
 rebuilt. Reprints (same headline within 12 hours) are grouped: a query returns
 each story once, with a reprint count as of the decision time, its publisher

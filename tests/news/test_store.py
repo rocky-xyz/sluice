@@ -194,3 +194,10 @@ def test_reopening_keeps_data_and_rejects_unknown_schema(tmp_path):
     conn.close()
     with pytest.raises(RuntimeError):
         NewsStore(path)
+
+
+def test_a_later_copy_fills_gaps_but_never_overwrites(store):
+    store.add([make(1, summary=None, publisher="Reuters")])
+    store.add([make(1, summary="Now with a summary", publisher="Someone else", title="Changed")])
+    (row,) = store.query("NVDA", before=T)
+    assert (row.summary, row.publisher, row.title) == ("Now with a summary", "Reuters", "Headline 1")

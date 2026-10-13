@@ -120,6 +120,36 @@ def news_import(
         console.print(f"{store.rebuild_clusters()} articles are reprints of an earlier one")
 
 
+@news_app.command("resolve-links")
+def news_resolve_links(
+    raw_dir: Annotated[
+        Path, typer.Option("--raw-dir", help="Raw JSONL archive holding the Finnhub items.")
+    ] = Path("data/raw"),
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Follow at most this many links.")
+    ] = None,
+) -> None:
+    """Record where Finnhub's article links lead. Interrupt and rerun freely: it resumes."""
+    from rich.progress import Progress
+
+    from sluice.news.finnhub_links import resolve_links
+
+    with Progress() as bar:
+        task = bar.add_task("links", total=None)
+        result = resolve_links(
+            raw_dir,
+            limit=limit,
+            on_step=lambda done, total: bar.update(task, completed=done, total=total),
+        )
+    Console().print(
+        f"pending {result.pending}, resolved {result.resolved}, dead {result.dead}, "
+        f"failed {result.failed}"
+    )
+    if result.aborted:
+        typer.echo(f"Stopped: {result.aborted}. Rerun to continue.", err=True)
+        raise typer.Exit(code=1)
+
+
 @news_app.command("backfill")
 def news_backfill(
     start: Annotated[
