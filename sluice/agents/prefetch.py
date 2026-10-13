@@ -1,11 +1,13 @@
 from datetime import date, datetime, timedelta
 
-from sluice.agents import indicators
-from sluice.agents.config import NewsConfig, PipelineConfig, PricesConfig
-from sluice.agents.state import Gap, Inputs, NewsInput, PriceInput
+from sluice.agents import fundamentals, indicators
+from sluice.agents.config import FundamentalsConfig, NewsConfig, PipelineConfig, PricesConfig
+from sluice.agents.state import FundamentalInput, Gap, Inputs, NewsInput, PriceInput
+from sluice.fundamentals.store import FundamentalsStore
 from sluice.market_calendar import close_of, last_closed_session
 from sluice.news.models import StoredNews
 from sluice.news.store import NewsStore
+from sluice.news.timeutil import ET
 from sluice.prices.store import PriceStore
 from sluice.universe import canonical
 
@@ -95,9 +97,67 @@ def prefetch_news(
     ], []
 
 
+def prefetch_fundamentals(
+    statements: FundamentalsStore,
+    prices: PriceStore,
+    ticker: str,
+    decision_time: datetime,
+    config: FundamentalsConfig,
+) -> tuple[list[FundamentalInput], list[Gap]]:
+    """Figures from the quarters that count as published on the decision day.
+
+    Statements are only read from the store, never fetched here: the vendor's
+    daily quota is too small to spend without being asked.
+    """
+
+    def gap(reason: str) -> Gap:
+        return Gap(kind="fundamentals", reason=reason)
+
+    stored = statements.quarters(ticker)
+    if stored is None:
+        return [], [gap("no statements stored for this ticker")]
+    decision_day = decision_time.astimezone(ET).date()
+    seen = fundamentals.visible(stored, decision_day, config.lag_days)
+    if not seen:
+        return [], [gap("no quarter counts as published yet")]
+
+    last_bar = prices.history(ticker, last_closed_session(decision_time), limit=1)
+    close = last_bar[0].raw_close if last_bar else None
+    figures = fundamentals.compute(seen, close, config.quarters)
+    units = dict(fundamentals.QUARTER_FIGURES)
+    shown = []
+    for name in fundamentals.names(config.quarters):
+        if name not in figures:
+            continue
+        value, quarter = figures[name]
+        unit = units.get(name.rsplit("_q", 1)[0], "multiple")
+        shown.append(
+            FundamentalInput(
+                ref=f"F:{name}",
+                name=name,
+                value=value if unit == "amount" else round(value, VALUE_DIGITS),
+                unit=unit,
+                currency=quarter.currency if unit == "amount" else None,
+                quarter_end=quarter.end,
+                visible_from=fundamentals.visible_from(quarter, config.lag_days),
+            )
+        )
+
+    gaps = []
+    if len(seen) < config.quarters:
+        gaps.append(gap(f"only {len(seen)} of {config.quarters} quarters are published"))
+    currencies = {quarter.currency for quarter in seen[-4:]}
+    if currencies != {fundamentals.PRICE_CURRENCY}:
+        gaps.append(gap(f"no valuation: statements are in {', '.join(sorted(currencies))}"))
+    if missing := [n for n in fundamentals.names(config.quarters) if n not in figures]:
+        gaps.append(gap(f"could not compute: {', '.join(missing)}"))
+    return shown, gaps
+
+
 def prefetch(
     store: NewsStore,
     prices: PriceStore,
+    statements: FundamentalsStore,
     ticker: str,
     decision_time: datetime,
     config: PipelineConfig,
@@ -107,9 +167,13 @@ def prefetch(
         prices, ticker, decision_time, config.prices
     )
     news, news_gaps = prefetch_news(store, ticker, decision_time, config.news)
+    figures, fundamentals_gaps = prefetch_fundamentals(
+        statements, prices, ticker, decision_time, config.fundamentals
+    )
     return Inputs(
         prices=indicators_shown,
         prices_as_of=as_of,
         news=news,
-        gaps=[*price_gaps, *news_gaps],
+        fundamentals=figures,
+        gaps=[*price_gaps, *news_gaps, *fundamentals_gaps],
     )

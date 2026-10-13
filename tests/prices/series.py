@@ -20,5 +20,6 @@ def series(last: date, count: int, drift: float = 0.001, start: float = 100.0) -
     bars, close = [], start
     for i, day in enumerate(trading_days(last, count)):
         close *= 1 + drift + 0.01 * math.sin(i)
-        bars.append(Bar(day=day, close=close, volume=1_000_000 + 50_000 * (i % 7)))
+        volume = 1_000_000 + 50_000 * (i % 7)
+        bars.append(Bar(day=day, close=close, raw_close=close * 1.02, volume=volume))
     return bars

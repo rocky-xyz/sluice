@@ -21,6 +21,13 @@ class PricesConfig(BaseModel):
     benchmark: str = Field(min_length=1)
 
 
+class FundamentalsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    lag_days: int = Field(ge=0)  # a quarter counts as published this long after it ends
+    quarters: int = Field(gt=0)  # how many of the latest visible quarters are shown
+
+
 class PipelineConfig(BaseModel):
     """One version of everything about the pipeline that may be changed and compared."""
 
@@ -33,6 +40,7 @@ class PipelineConfig(BaseModel):
     models: dict[str, str]  # role -> model
     prices: PricesConfig
     news: NewsConfig
+    fundamentals: FundamentalsConfig
     prompts: dict[str, str]  # role -> system prompt
 
 

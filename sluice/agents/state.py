@@ -12,6 +12,7 @@ RunMode = Literal["backtest", "adhoc"]
 Status = Literal["ok", "failed"]
 Rating = Literal["buy", "overweight", "hold", "underweight", "sell"]
 GapKind = Literal["prices", "news", "fundamentals"]
+FigureUnit = Literal["amount", "ratio", "points", "multiple"]
 
 # How a source is cited in a report: [N48213], [P:rsi14], [F:revenue_q] or [N1, N2].
 _REF = r"(?:N\d+|[PF]:\w+)"
@@ -50,21 +51,34 @@ class PriceInput(BaseModel):
     value: float
 
 
+class FundamentalInput(BaseModel):
+    """One figure from the financial statements exactly as the fundamentals analyst saw it."""
+
+    ref: str  # "F:" + the figure's name
+    name: str
+    value: float
+    unit: FigureUnit
+    currency: str | None  # of an amount
+    quarter_end: date  # the quarter it belongs to; for a four-quarter figure, the latest
+    visible_from: date  # the first day that quarter counted as published
+
+
 class Gap(BaseModel):
     kind: GapKind
     reason: str
 
 
 class Inputs(BaseModel):
-    """Snapshot of everything pre-fetched for the run. Fundamentals join in task 2.5."""
+    """Snapshot of everything pre-fetched for the run."""
 
     prices: list[PriceInput] = []
     prices_as_of: date | None = None  # the trading day the indicators are computed on
     news: list[NewsInput] = []
+    fundamentals: list[FundamentalInput] = []
     gaps: list[Gap] = []
 
     def refs(self) -> set[str]:
-        return {item.ref for item in (*self.prices, *self.news)}
+        return {item.ref for item in (*self.prices, *self.news, *self.fundamentals)}
 
 
 class Report(BaseModel):
@@ -130,7 +144,19 @@ class PipelineState(TypedDict, total=False):
 
 
 # Every class stored in a channel; the checkpointer needs the list to read them back.
-STATE_MODELS = (Meta, PriceInput, NewsInput, Gap, Inputs, Report, Turn, Evidence, Decision, Call)
+STATE_MODELS = (
+    Meta,
+    PriceInput,
+    NewsInput,
+    FundamentalInput,
+    Gap,
+    Inputs,
+    Report,
+    Turn,
+    Evidence,
+    Decision,
+    Call,
+)
 
 
 def make_run_id(

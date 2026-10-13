@@ -9,7 +9,13 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from sluice.agents import indicators
 from sluice.agents.cache import CallCache
-from sluice.agents.config import NewsConfig, PipelineConfig, PricesConfig, load_config
+from sluice.agents.config import (
+    FundamentalsConfig,
+    NewsConfig,
+    PipelineConfig,
+    PricesConfig,
+    load_config,
+)
 from sluice.agents.graph import Deps, build_graph, open_checkpointer, run
 from sluice.agents.llm import CachedLLM, LLMError, LLMRequest, LLMResponse
 from sluice.agents.prefetch import (
@@ -26,9 +32,11 @@ from sluice.agents.state import (
     make_run_id,
     merge_meta,
 )
+from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.models import NewsItem
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
+from tests.fundamentals.statements import stock
 from tests.prices.series import series
 
 DAY = date(2026, 9, 30)
@@ -39,11 +47,23 @@ CONFIG = PipelineConfig(
     digest="abc12345",
     temperature=0.0,
     retries=2,
-    models={"news_analyst": "fast-model", "research_manager": "deep-model"},
+    models={
+        "market_analyst": "fast-model",
+        "news_analyst": "fast-model",
+        "fundamentals_analyst": "fast-model",
+        "research_manager": "deep-model",
+    },
     prices=PricesConfig(lookback_days=250, benchmark="SPY"),
     news=NEWS,
-    prompts={"news_analyst": "You are the news analyst.", "research_manager": "You decide."},
+    fundamentals=FundamentalsConfig(lag_days=60, quarters=4),
+    prompts={
+        "market_analyst": "You are the market analyst.",
+        "news_analyst": "You are the news analyst.",
+        "fundamentals_analyst": "You are the fundamentals analyst.",
+        "research_manager": "You decide.",
+    },
 )
+ROLE_OF_PROMPT = {prompt: role for role, prompt in CONFIG.prompts.items()}
 
 
 def article(n: int, published: datetime, title: str | None = None) -> NewsItem:
@@ -93,34 +113,52 @@ def verdict(*refs: str, rating: str = "overweight") -> str:
 class FakeModel:
     """Stands in for DeepSeek. Each role answers from its own queue; the last answer repeats."""
 
-    def __init__(self, analyst=("Demand is strong [N1]. Supply is tight [N2].",), manager=None):
+    def __init__(
+        self,
+        analyst=("Demand is strong [N1]. Supply is tight [N2].",),
+        manager=None,
+        market=("The trend is up [P:ret_5d].",),
+        fundamentals=("Revenue keeps growing [F:revenue_q0].",),
+    ):
         self.answers = {
-            "fast-model": list(analyst),
-            "deep-model": list(manager if manager is not None else [verdict("N1")]),
+            "market_analyst": list(market),
+            "news_analyst": list(analyst),
+            "fundamentals_analyst": list(fundamentals),
+            "research_manager": list(manager if manager is not None else [verdict("N1")]),
         }
-        self.requests: list[LLMRequest] = []
+        self.requests: list[tuple[str, LLMRequest]] = []
 
     def complete(self, request: LLMRequest) -> LLMResponse:
-        self.requests.append(request)
-        queue = self.answers[request.model]
+        role = ROLE_OF_PROMPT[request.messages[0].content]
+        self.requests.append((role, request))
+        queue = self.answers[role]
         answer = queue.pop(0) if len(queue) > 1 else queue[0]
         if isinstance(answer, Exception):
             raise answer
         return LLMResponse(text=answer, input_tokens=100, output_tokens=20)
 
-    def asked(self, model: str) -> list[LLMRequest]:
-        return [r for r in self.requests if r.model == model]
+    def asked(self, role: str) -> list[LLMRequest]:
+        return [request for asked, request in self.requests if asked == role]
 
 
-def pipeline(store, tmp_path, model, cache_name="llm.db", checkpoints=True):
+def pipeline(
+    store, tmp_path, model, cache_name="llm.db", checkpoints=True, with_statements=True
+):
     cache = CallCache(tmp_path / cache_name)
     saver = open_checkpointer(tmp_path / "checkpoints.db") if checkpoints else None
     prices = PriceStore(tmp_path / "prices.db")
     if prices.latest("NVDA") is None:
         prices.replace("NVDA", series(DAY, 260, drift=0.002))
         prices.replace("SPY", series(DAY, 260, drift=0.001))
+    statements = FundamentalsStore(tmp_path / "statements")
+    if with_statements:
+        stock(statements, "NVDA")
     llm = CachedLLM(cache, model, sleep=lambda _: None)
-    return build_graph(Deps(store, prices, llm, CONFIG), saver)
+    return build_graph(Deps(store, prices, statements, llm, CONFIG), saver)
+
+
+def roles_used(state) -> list[tuple[str, bool]]:
+    return sorted((call.role, call.cached) for call in state["usage"])
 
 
 def go(graph, repeat=0):
@@ -226,7 +264,10 @@ def test_a_failed_run_stays_failed_when_updates_are_merged():
 def test_the_shipped_config_loads():
     config = load_config("v1", Path(__file__).parents[2] / "configs")
     assert config.version == "v1"
-    assert set(config.models) == set(config.prompts) == {"news_analyst", "research_manager"}
+    assert set(config.models) == set(config.prompts) == {
+        "market_analyst", "news_analyst", "fundamentals_analyst", "research_manager",
+    }  # fmt: skip
+    assert (config.fundamentals.lag_days, config.fundamentals.quarters) == (60, 4)
     assert (config.prices.lookback_days, config.prices.benchmark) == (250, "SPY")
     assert (config.temperature, config.retries) == (0.0, 2)
     assert (config.news.lookback_days, config.news.max_items) == (14, 50)
@@ -259,7 +300,10 @@ def test_a_run_ends_with_a_rating_and_its_evidence(stocked, tmp_path):
     assert (decision.rating, decision.confidence) == ("overweight", 0.6)
     assert decision.evidence[0].refs == ["N1"]
     assert decision.notes == []
-    assert [(c.role, c.model, c.cached) for c in state["usage"]] == [
+    assert set(state["reports"]) == {"market", "news", "fundamentals"}
+    assert sorted((c.role, c.model, c.cached) for c in state["usage"]) == [
+        ("fundamentals_analyst", "fast-model", False),
+        ("market_analyst", "fast-model", False),
         ("news_analyst", "fast-model", False),
         ("research_manager", "deep-model", False),
     ]
@@ -269,23 +313,38 @@ def test_each_role_uses_its_configured_model_prompt_and_temperature(stocked, tmp
     model = FakeModel()
     go(pipeline(stocked, tmp_path, model))
 
-    analyst, manager = model.requests
-    assert (analyst.model, analyst.messages[0].content) == ("fast-model", "You are the news analyst.")
-    assert (manager.model, manager.messages[0].content) == ("deep-model", "You decide.")
-    assert (analyst.temperature, manager.temperature) == (0.0, 0.0)
-    assert (analyst.json_mode, manager.json_mode) == (False, True)
+    assert sorted(role for role, _ in model.requests) == sorted(CONFIG.models)
+    assert model.requests[-1][0] == "research_manager"  # after all three analysts
+    for role, request in model.requests:
+        assert request.model == CONFIG.models[role]
+        assert request.messages[0].content == CONFIG.prompts[role]
+        assert request.temperature == 0.0
+        assert request.json_mode is (role == "research_manager")
 
 
-def test_the_analyst_sees_the_snapshot_and_the_manager_only_the_report(stocked, tmp_path):
+def test_each_analyst_sees_its_own_snapshot_and_the_manager_only_the_reports(stocked, tmp_path):
     model = FakeModel()
     state = go(pipeline(stocked, tmp_path, model))
+    inputs = state["inputs"]
+    shown = {role: request.messages[1].content for role, request in model.requests}
 
-    analyst, manager = (request.messages[1].content for request in model.requests)
-    for item in state["inputs"].news:
-        assert f"[{item.ref}]" in analyst and item.title in analyst and item.summary in analyst
+    news, manager = shown["news_analyst"], shown["research_manager"]
+    for item in inputs.news:
+        assert f"[{item.ref}]" in news and item.title in news and item.summary in news
         assert item.title not in manager and item.summary not in manager
-    assert "Chipmaker headline 3" not in analyst and "Chipmaker headline 4" not in analyst
-    assert state["reports"]["news"].text in manager
+    assert "Chipmaker headline 3" not in news and "Chipmaker headline 4" not in news
+
+    assert all(f"[{item.ref}]" in shown["market_analyst"] for item in inputs.prices)
+    assert all(f"[{item.ref}]" in shown["fundamentals_analyst"] for item in inputs.fundamentals)
+    assert "[P:" not in news and "[F:" not in news
+    assert "[N" not in shown["market_analyst"] and "[F:" not in shown["market_analyst"]
+    assert "[N" not in shown["fundamentals_analyst"] and "[P:" not in shown["fundamentals_analyst"]
+
+    for report in state["reports"].values():
+        assert report.text in manager
+    revenue = next(item for item in inputs.fundamentals if item.name == "revenue_q0")
+    assert f"{revenue.value:,.0f}" in shown["fundamentals_analyst"]
+    assert f"{revenue.value:,.0f}" not in manager
 
 
 def test_a_report_citing_an_unknown_id_is_asked_again(stocked, tmp_path):
@@ -293,7 +352,7 @@ def test_a_report_citing_an_unknown_id_is_asked_again(stocked, tmp_path):
     state = go(pipeline(stocked, tmp_path, model))
 
     assert state["reports"]["news"].text == "Demand is strong [N1]."
-    assert len(model.asked("fast-model")) == 3
+    assert len(model.asked("news_analyst")) == 3
 
 
 def test_evidence_citing_an_unknown_id_is_asked_again(stocked, tmp_path):
@@ -302,7 +361,7 @@ def test_evidence_citing_an_unknown_id_is_asked_again(stocked, tmp_path):
     state = go(pipeline(stocked, tmp_path, model))
 
     assert state["decision"].evidence[0].refs == ["N1"]
-    assert len(model.asked("deep-model")) == 3
+    assert len(model.asked("research_manager")) == 3
     assert [c.role for c in state["usage"]].count("research_manager") == 3
 
 
@@ -314,7 +373,7 @@ def test_without_an_acceptable_answer_the_run_fails_and_has_no_rating(stocked, t
     assert state["meta"].status == "failed"
     assert state["meta"].failure.startswith("research_manager:")
     assert state.get("decision") is None
-    assert len(model.asked("deep-model")) == CONFIG.retries + 1
+    assert len(model.asked("research_manager")) == CONFIG.retries + 1
     assert dump_state(state)["decision"] is None
 
 
@@ -324,19 +383,51 @@ def test_a_failed_analyst_ends_the_run_before_the_manager(stocked, tmp_path):
 
     assert state["meta"].status == "failed"
     assert state["meta"].failure == "news_analyst: HTTP 401"
-    assert model.asked("deep-model") == []
+    assert model.asked("research_manager") == []
 
 
-def test_without_news_nobody_is_asked_and_the_gap_is_recorded(store, tmp_path):
+def test_an_analyst_without_data_is_not_asked_and_the_gap_is_noted(store, tmp_path):
+    model = FakeModel(manager=[verdict("P:ret_5d")])
+    state = go(pipeline(store, tmp_path, model, with_statements=False))
+
+    assert model.asked("news_analyst") == [] and model.asked("fundamentals_analyst") == []
+    assert state["reports"]["news"].no_data and state["reports"]["fundamentals"].no_data
+    assert sorted(gap.kind for gap in state["inputs"].gaps) == ["fundamentals", "news"]
+    assert state["meta"].status == "ok"
+    assert state["decision"].notes == [
+        "Gap in news: no items in the 14 days before the decision time.",
+        "Gap in fundamentals: no statements stored for this ticker.",
+    ]
+    assert "(no data)" in model.asked("research_manager")[0].messages[1].content
+
+
+def test_when_no_analyst_has_data_the_manager_is_not_asked_and_the_run_fails(store, tmp_path):
     model = FakeModel()
-    state = go(pipeline(store, tmp_path, model))
+    cache = CallCache(tmp_path / "llm.db")
+    empty = Deps(
+        store,
+        PriceStore(tmp_path / "none.db"),
+        FundamentalsStore(tmp_path / "none"),
+        CachedLLM(cache, model),
+        CONFIG,
+    )
+    state = go(build_graph(empty))
 
     assert model.requests == []
-    assert state["reports"]["news"].no_data
-    assert [gap.kind for gap in state["inputs"].gaps] == ["news"]
-    # with a single analyst there is then nothing to decide on
     assert state["meta"].status == "failed"
+    assert state["meta"].failure == "research_manager: no report has any data"
     assert state.get("decision") is None
+
+
+def test_failures_of_two_analysts_at_once_are_both_recorded(stocked, tmp_path):
+    model = FakeModel(analyst=[LLMError("HTTP 401")], market=[LLMError("HTTP 402")])
+    state = go(pipeline(stocked, tmp_path, model))
+
+    assert state["meta"].status == "failed"
+    assert "news_analyst: HTTP 401" in state["meta"].failure
+    assert "market_analyst: HTTP 402" in state["meta"].failure
+    assert model.asked("research_manager") == []
+    assert state["reports"]["fundamentals"].text == "Revenue keeps growing [F:revenue_q0]."
 
 
 # --- cache, repeats, checkpoints ---
@@ -347,7 +438,7 @@ def test_a_finished_run_is_returned_without_new_calls(stocked, tmp_path):
     first = go(pipeline(stocked, tmp_path, model))
     again = go(pipeline(stocked, tmp_path, model))
 
-    assert len(model.requests) == 2
+    assert len(model.requests) == 4
     assert dump_state(again) == dump_state(first)
 
 
@@ -356,7 +447,7 @@ def test_without_checkpoints_a_rerun_is_served_by_the_cache(stocked, tmp_path):
     first = go(pipeline(stocked, tmp_path, model, checkpoints=False))
     again = go(pipeline(stocked, tmp_path, model, checkpoints=False))
 
-    assert len(model.requests) == 2
+    assert len(model.requests) == 4
     assert all(call.cached for call in again["usage"])
     assert again["decision"] == first["decision"]
     assert again["inputs"] == first["inputs"]
@@ -367,7 +458,7 @@ def test_another_repeat_is_another_run_with_new_calls(stocked, tmp_path):
     graph = pipeline(stocked, tmp_path, model)
     first, second = go(graph, repeat=0), go(graph, repeat=1)
 
-    assert len(model.requests) == 4
+    assert len(model.requests) == 8
     assert (first["meta"].repeat, second["meta"].repeat) == (0, 1)
     assert first["meta"].run_id != second["meta"].run_id
 
@@ -380,8 +471,13 @@ def test_an_interrupted_run_continues_after_its_last_finished_node(stocked, tmp_
     # an empty cache: only the checkpoint can spare the analyst a second call
     state = go(pipeline(stocked, tmp_path, model, cache_name="fresh.db"))
     assert state["meta"].status == "ok"
-    assert len(model.asked("fast-model")) == 1
-    assert [c.role for c in state["usage"]] == ["news_analyst", "research_manager"]
+    assert len(model.asked("news_analyst")) == 1
+    assert roles_used(state) == [
+        ("fundamentals_analyst", False),
+        ("market_analyst", False),
+        ("news_analyst", False),
+        ("research_manager", False),
+    ]
 
 
 def test_a_failed_run_starts_over_and_only_asks_what_failed(stocked, tmp_path):
@@ -391,8 +487,10 @@ def test_a_failed_run_starts_over_and_only_asks_what_failed(stocked, tmp_path):
 
     state = go(pipeline(stocked, tmp_path, model))
     assert state["meta"].status == "ok"
-    assert len(model.asked("fast-model")) == 1
-    assert [(c.role, c.cached) for c in state["usage"]] == [
+    assert len(model.asked("news_analyst")) == 1
+    assert roles_used(state) == [
+        ("fundamentals_analyst", True),
+        ("market_analyst", True),
         ("news_analyst", True),
         ("research_manager", False),
     ]
@@ -526,8 +624,14 @@ def test_the_run_snapshot_holds_the_indicators_but_the_news_analyst_cannot_cite_
     assert state["inputs"].prices_as_of == DAY
     assert len(state["inputs"].prices) == len(indicators.NAMES)
     assert "P:ret_5d" in state["inputs"].refs()
-    assert len(model.asked("fast-model")) == 2
-    assert "ret_5d" not in model.requests[0].messages[1].content
+    assert len(model.asked("news_analyst")) == 2
+    assert "ret_5d" not in model.asked("news_analyst")[0].messages[1].content
     assert dump_state(state)["inputs"]["prices"][0] == {
         "ref": "P:ret_5d", "name": "ret_5d", "value": state["inputs"].prices[0].value,
     }  # fmt: skip
+
+
+def test_the_manager_may_cite_what_any_report_cites(stocked, tmp_path):
+    model = FakeModel(manager=[verdict("P:ret_5d", "N1", "F:revenue_q0")])
+    state = go(pipeline(stocked, tmp_path, model))
+    assert state["decision"].evidence[0].refs == ["P:ret_5d", "N1", "F:revenue_q0"]

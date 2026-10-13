@@ -14,6 +14,7 @@ from sluice.agents.config import PipelineConfig
 from sluice.agents.llm import CachedLLM
 from sluice.agents.prefetch import prefetch
 from sluice.agents.state import STATE_MODELS, Meta, PipelineState, RunMode, make_run_id
+from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
 from sluice.universe import canonical
@@ -27,6 +28,7 @@ class Deps:
 
     store: NewsStore
     prices: PriceStore
+    statements: FundamentalsStore
     llm: CachedLLM
     config: PipelineConfig
 
@@ -34,19 +36,32 @@ class Deps:
 def build_graph(
     deps: Deps, checkpointer: BaseCheckpointSaver | None = None
 ) -> CompiledStateGraph:
-    """prefetch -> news analyst -> research manager; a failed analyst ends the run.
+    """prefetch -> three analysts side by side -> research manager.
 
-    The research manager validates its own answer, because a rejected answer has
-    to be asked again and the retry lives with the call.
+    The analysts do not depend on each other. `analysts_done` waits for all
+    three, so the manager runs once and only when none of them failed. The
+    manager validates its own answer, because a rejected answer has to be asked
+    again and the retry lives with the call.
     """
 
     def prefetch_node(state: PipelineState) -> dict:
         meta = state["meta"]
-        inputs = prefetch(deps.store, deps.prices, meta.ticker, meta.decision_time, deps.config)
+        inputs = prefetch(
+            deps.store, deps.prices, deps.statements, meta.ticker, meta.decision_time, deps.config
+        )
         return {"inputs": inputs}
+
+    def market_analyst_node(state: PipelineState) -> dict:
+        return roles.market_analyst(state, deps.llm, deps.config)
 
     def news_analyst_node(state: PipelineState) -> dict:
         return roles.news_analyst(state, deps.llm, deps.config)
+
+    def fundamentals_analyst_node(state: PipelineState) -> dict:
+        return roles.fundamentals_analyst(state, deps.llm, deps.config)
+
+    def analysts_done_node(state: PipelineState) -> dict:
+        return {}
 
     def research_manager_node(state: PipelineState) -> dict:
         return roles.research_manager(state, deps.llm, deps.config)
@@ -54,13 +69,21 @@ def build_graph(
     def after_analysts(state: PipelineState) -> str:
         return END if state["meta"].status == "failed" else roles.RESEARCH_MANAGER
 
+    analysts = {
+        roles.MARKET_ANALYST: market_analyst_node,
+        roles.NEWS_ANALYST: news_analyst_node,
+        roles.FUNDAMENTALS_ANALYST: fundamentals_analyst_node,
+    }
     graph = StateGraph(PipelineState)
     graph.add_node("prefetch", prefetch_node)
-    graph.add_node(roles.NEWS_ANALYST, news_analyst_node)
+    graph.add_node("analysts_done", analysts_done_node)
     graph.add_node(roles.RESEARCH_MANAGER, research_manager_node)
     graph.add_edge(START, "prefetch")
-    graph.add_edge("prefetch", roles.NEWS_ANALYST)
-    graph.add_conditional_edges(roles.NEWS_ANALYST, after_analysts, [roles.RESEARCH_MANAGER, END])
+    for name, node in analysts.items():
+        graph.add_node(name, node)
+        graph.add_edge("prefetch", name)
+    graph.add_edge(list(analysts), "analysts_done")
+    graph.add_conditional_edges("analysts_done", after_analysts, [roles.RESEARCH_MANAGER, END])
     graph.add_edge(roles.RESEARCH_MANAGER, END)
     return graph.compile(checkpointer=checkpointer)
 

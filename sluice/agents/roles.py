@@ -5,24 +5,60 @@ from sluice.agents.llm import CachedLLM, LLMError, LLMRequest, LLMResponse, Mess
 from sluice.agents.state import (
     Call,
     Decision,
+    FundamentalInput,
     Inputs,
     Meta,
     NewsInput,
     PipelineState,
+    PriceInput,
     Report,
     Verdict,
     cited_refs,
 )
 from sluice.news.timeutil import ET
 
+MARKET_ANALYST = "market_analyst"
 NEWS_ANALYST = "news_analyst"
+FUNDAMENTALS_ANALYST = "fundamentals_analyst"
 RESEARCH_MANAGER = "research_manager"
-# Channel key of each analyst's report.
-REPORT_KEYS = {NEWS_ANALYST: "news"}
+# Each analyst and the channel key of its report.
+ANALYSTS = {MARKET_ANALYST: "market", NEWS_ANALYST: "news", FUNDAMENTALS_ANALYST: "fundamentals"}
+
+PRICE_LABELS = {
+    "ret_5d": "return over the last 5 trading days",
+    "ret_20d": "return over the last 20 trading days",
+    "ret_60d": "return over the last 60 trading days",
+    "excess_5d": "return minus the S&P 500 ETF's over the last 5 trading days",
+    "excess_20d": "return minus the S&P 500 ETF's over the last 20 trading days",
+    "excess_60d": "return minus the S&P 500 ETF's over the last 60 trading days",
+    "vol_20d": "annualised volatility of the last 20 daily returns",
+    "vs_sma50": "last close relative to its 50-day average",
+    "vs_sma200": "last close relative to its 200-day average",
+    "rsi_14": "14-day RSI (0 to 100)",
+    "volume_ratio_20d": "last day's volume relative to the average of the 20 days before",
+}
+FIGURE_LABELS = {
+    "revenue": "revenue",
+    "revenue_yoy": "revenue, change from the same quarter a year earlier",
+    "gross_margin": "gross margin",
+    "gross_margin_yoy": "gross margin, change from the same quarter a year earlier",
+    "operating_margin": "operating margin",
+    "operating_margin_yoy": "operating margin, change from the same quarter a year earlier",
+    "net_income": "net income",
+    "net_income_yoy": "net income, change from the same quarter a year earlier",
+    "fcf": "free cash flow",
+    "fcf_yoy": "free cash flow, change from the same quarter a year earlier",
+    "pe_ttm": "market value over net income of the last four quarters",
+    "ps_ttm": "market value over revenue of the last four quarters",
+}
 
 
 def _eastern(moment: datetime) -> str:
     return moment.astimezone(ET).strftime("%Y-%m-%d %H:%M ET")
+
+
+def _header(meta: Meta) -> str:
+    return f"Stock: {meta.ticker}\nDecision time: {_eastern(meta.decision_time)}"
 
 
 def _calls(role: str, model: str, answers: list[LLMResponse]) -> list[Call]:
@@ -58,6 +94,66 @@ def _request(config: PipelineConfig, role: str, user: str, json_mode: bool = Fal
     )
 
 
+def _analyst(
+    state: PipelineState,
+    llm: CachedLLM,
+    config: PipelineConfig,
+    role: str,
+    known: set[str],
+    prompt: str,
+    nothing: str,
+) -> dict:
+    """Writes one report that cites what it was shown. No call when it was shown nothing.
+
+    `known` holds the reference ids in `prompt`: the only ones this analyst may cite.
+    """
+    meta, key = state["meta"], ANALYSTS[role]
+    if not known:
+        return {"reports": {key: Report(text=nothing, no_data=True)}}
+
+    def check(answer: LLMResponse) -> Report:
+        text = answer.text.strip()
+        cited = cited_refs(text)
+        if not cited:
+            raise ValueError("the report cites no reference id")
+        if unknown := sorted(cited - known):
+            raise ValueError(f"the report cites ids that were not given: {unknown}")
+        return Report(text=text)
+
+    request = _request(config, role, prompt)
+    try:
+        report, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
+    except LLMError as error:
+        return _failed(meta, role, error, request.model)
+    return {"reports": {key: report}, "usage": _calls(role, request.model, answers)}
+
+
+def _price_line(item: PriceInput) -> str:
+    if item.name.startswith("rsi_"):
+        shown = f"{item.value:.1f}"
+    elif item.name.startswith("volume_ratio_"):
+        shown = f"{item.value:.2f}x"
+    elif item.name.startswith("vol_"):
+        shown = f"{item.value:.2%}"
+    else:
+        shown = f"{item.value:+.2%}"
+    return f"[{item.ref}] {PRICE_LABELS.get(item.name, item.name)}: {shown}"
+
+
+def market_prompt(meta: Meta, inputs: Inputs) -> str:
+    header = f"{_header(meta)}\nIndicators as of the close of {inputs.prices_as_of}:"
+    return "\n".join([header, *(_price_line(item) for item in inputs.prices)])
+
+
+def market_analyst(state: PipelineState, llm: CachedLLM, config: PipelineConfig) -> dict:
+    meta, inputs = state["meta"], state["inputs"]
+    known = {item.ref for item in inputs.prices}
+    nothing = "No price data was available."
+    return _analyst(
+        state, llm, config, MARKET_ANALYST, known, market_prompt(meta, inputs), nothing
+    )
+
+
 def _news_line(item: NewsInput) -> str:
     facts = [_eastern(item.published_at), item.publisher or "publisher unknown"]
     if item.session:
@@ -71,39 +167,50 @@ def _news_line(item: NewsInput) -> str:
 
 
 def news_prompt(meta: Meta, inputs: Inputs) -> str:
-    header = f"Stock: {meta.ticker}\nDecision time: {_eastern(meta.decision_time)}\n\nNews items:"
-    return "\n\n".join([header, *(_news_line(item) for item in inputs.news)])
+    return "\n\n".join(
+        [f"{_header(meta)}\n\nNews items:", *(_news_line(item) for item in inputs.news)]
+    )
 
 
 def news_analyst(state: PipelineState, llm: CachedLLM, config: PipelineConfig) -> dict:
-    """Reads the pre-fetched news, writes a report that cites it. No call when there is no news."""
     meta, inputs = state["meta"], state["inputs"]
-    key = REPORT_KEYS[NEWS_ANALYST]
-    if not inputs.news:
-        return {"reports": {key: Report(text="No news was available.", no_data=True)}}
+    known = {item.ref for item in inputs.news}
+    return _analyst(
+        state, llm, config, NEWS_ANALYST, known, news_prompt(meta, inputs), "No news was available."
+    )
 
-    known = {item.ref for item in inputs.news}  # the only sources this analyst was shown
 
-    def check(answer: LLMResponse) -> Report:
-        text = answer.text.strip()
-        cited = cited_refs(text)
-        if not cited:
-            raise ValueError("the report cites no reference id")
-        if unknown := sorted(cited - known):
-            raise ValueError(f"the report cites ids that were not given: {unknown}")
-        return Report(text=text)
+def _figure_line(item: FundamentalInput) -> str:
+    base = item.name.rsplit("_q", 1)[0]
+    if item.unit == "amount":
+        shown = f"{item.value:,.0f} {item.currency}"
+    elif item.unit == "points":
+        shown = f"{item.value * 100:+.2f} percentage points"
+    elif item.unit == "multiple":
+        shown = f"{item.value:.1f}x"
+    else:
+        shown = f"{item.value:+.2%}" if base.endswith("_yoy") else f"{item.value:.2%}"
+    period = "four quarters to" if item.unit == "multiple" else "quarter ended"
+    return f"[{item.ref}] {FIGURE_LABELS.get(base, base)}, {period} {item.quarter_end}: {shown}"
 
-    request = _request(config, NEWS_ANALYST, news_prompt(meta, inputs))
-    try:
-        report, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
-    except LLMError as error:
-        return _failed(meta, NEWS_ANALYST, error, request.model)
-    return {"reports": {key: report}, "usage": _calls(NEWS_ANALYST, request.model, answers)}
+
+def fundamentals_prompt(meta: Meta, inputs: Inputs) -> str:
+    header = f"{_header(meta)}\nFigures from the published financial statements:"
+    return "\n".join([header, *(_figure_line(item) for item in inputs.fundamentals)])
+
+
+def fundamentals_analyst(state: PipelineState, llm: CachedLLM, config: PipelineConfig) -> dict:
+    meta, inputs = state["meta"], state["inputs"]
+    known = {item.ref for item in inputs.fundamentals}
+    nothing = "No financial statements were available."
+    return _analyst(
+        state, llm, config, FUNDAMENTALS_ANALYST, known, fundamentals_prompt(meta, inputs), nothing
+    )
 
 
 def manager_prompt(meta: Meta, reports: dict[str, Report]) -> str:
     """Reports only: the manager never sees the pre-fetched inputs."""
-    parts = [f"Stock: {meta.ticker}\nDecision time: {_eastern(meta.decision_time)}"]
+    parts = [_header(meta)]
     for name, report in sorted(reports.items()):
         marker = " (no data)" if report.no_data else ""
         parts.append(f"## {name} report{marker}\n{report.text}")
@@ -132,7 +239,7 @@ def research_manager(state: PipelineState, llm: CachedLLM, config: PipelineConfi
         verdict, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
     except LLMError as error:
         return _failed(meta, RESEARCH_MANAGER, error, request.model)
-    notes = [f"No {gap.kind}: {gap.reason}." for gap in inputs.gaps]
+    notes = [f"Gap in {gap.kind}: {gap.reason}." for gap in inputs.gaps]
     return {
         "decision": Decision(**verdict.model_dump(), notes=notes),
         "usage": _calls(RESEARCH_MANAGER, request.model, answers),

@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Self
@@ -22,7 +23,9 @@ class CallCache:
     def __init__(self, path: str | Path = DEFAULT_PATH) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        # Analysts run side by side on worker threads and share this connection.
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
@@ -36,11 +39,14 @@ class CallCache:
         self.close()
 
     def get(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT response FROM calls WHERE key = ?", (key,)).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT response FROM calls WHERE key = ?", (key,)
+            ).fetchone()
         return row[0] if row else None
 
     def put(self, key: str, request: str, response: str) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO calls (key, request, response, created_at)"
                 " VALUES (?, ?, ?, ?)",
@@ -48,4 +54,5 @@ class CallCache:
             )
 
     def __len__(self) -> int:
-        return self._conn.execute("SELECT count(*) FROM calls").fetchone()[0]
+        with self._lock:
+            return self._conn.execute("SELECT count(*) FROM calls").fetchone()[0]

@@ -7,11 +7,13 @@ from rich.console import Console
 from rich.table import Table
 
 from sluice import __version__
-from sluice.universe import UNIVERSE
+from sluice.universe import COMPANIES, UNIVERSE
 
 app = typer.Typer(help="Multi-agent equity research pipeline.", no_args_is_help=True)
 news_app = typer.Typer(help="News collection and storage.", no_args_is_help=True)
 app.add_typer(news_app, name="news")
+fundamentals_app = typer.Typer(help="Financial statements.", no_args_is_help=True)
+app.add_typer(fundamentals_app, name="fundamentals")
 
 
 def _version(value: bool) -> None:
@@ -55,6 +57,7 @@ def analyze(
     from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient
     from sluice.agents.prefetch import backtest_decision_time
     from sluice.agents.state import dump_state
+    from sluice.fundamentals.store import FundamentalsStore
     from sluice.news.store import NewsStore
     from sluice.prices.store import PriceStore
     from sluice.prices.yahoo import fetch_bars
@@ -73,7 +76,8 @@ def analyze(
     try:
         with NewsStore(db) as store, PriceStore(fetch=fetch_bars) as prices, CallCache() as cache:
             llm = CachedLLM(cache, DeepSeekClient(key))
-            graph = build_graph(Deps(store, prices, llm, config), checkpointer)
+            deps = Deps(store, prices, FundamentalsStore(), llm, config)
+            graph = build_graph(deps, checkpointer)
             state = run(graph, config, ticker, decision_time, repeat=repeat)
     finally:
         checkpointer.conn.close()
@@ -87,8 +91,10 @@ def analyze(
     inputs = state["inputs"]
     console.print(
         f"{meta.run_id}  price indicators: {len(inputs.prices)} (as of {inputs.prices_as_of}), "
-        f"news items: {len(inputs.news)}"
+        f"news items: {len(inputs.news)}, fundamentals: {len(inputs.fundamentals)}"
     )
+    for gap in inputs.gaps:
+        console.print(f"  gap in {gap.kind}: {gap.reason}", markup=False)
     for call in state.get("usage", []):
         source = "cache" if call.cached else "call"
         console.print(
@@ -104,6 +110,39 @@ def analyze(
     console.print(decision.rationale, markup=False)
     for note in decision.notes:
         console.print(f"note: {note}", markup=False)
+
+
+@fundamentals_app.command("fetch")
+def fundamentals_fetch(
+    tickers: Annotated[
+        str, typer.Option("--tickers", help="Comma-separated tickers to fetch.")
+    ] = ",".join(COMPANIES),
+    raw_dir: Annotated[
+        Path, typer.Option("--raw-dir", help="Where the vendor's answers are kept.")
+    ] = Path("data/local/raw/alphavantage"),
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Fetch again what is already stored.")
+    ] = False,
+) -> None:
+    """Fetch quarterly statements from Alpha Vantage: three calls a ticker, 25 a day. Resumable."""
+    import os
+
+    from sluice.fundamentals.alphavantage import Client
+    from sluice.fundamentals.store import FundamentalsStore, fetch
+
+    key = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+    if not key:
+        typer.echo("ALPHA_VANTAGE_API_KEY is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    symbols = [t for t in tickers.split(",") if t.strip()]
+    result = fetch(symbols, Client(key), FundamentalsStore(raw_dir), refresh=refresh)
+    Console().print(f"fetched {result.fetched}, already stored {result.already_stored}")
+    for failure in result.failed:
+        typer.echo(f"Failed: {failure}", err=True)
+    if result.stopped:
+        typer.echo(f"Stopped: {result.stopped}. Rerun tomorrow to continue.", err=True)
+    if result.stopped or result.failed:
+        raise typer.Exit(code=1)
 
 
 @news_app.command("collect")
