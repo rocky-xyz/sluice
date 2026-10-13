@@ -135,14 +135,14 @@ JSON object and nothing else:
   "rating": "buy" | "overweight" | "hold" | "underweight" | "sell",
   "confidence": a number from 0 to 1,
   "evidence": [
-    {"claim": "one sentence", "direction": "supports" | "opposes", "refs": ["N48213"]}
+    {"claim": "one sentence", "direction": "bullish" | "bearish", "refs": ["N48213"]}
   ],
   "rationale": "a short paragraph"
 }
 
 Rules:
-- "direction" says whether a claim supports or opposes your rating. List the strongest \
-opposing claims too.
+- "direction" says whether a claim is good ("bullish") or bad ("bearish") for the stock, \
+whatever your rating. List the strongest claims on both sides.
 - Every evidence item needs at least one reference id, and only ids that appear in the reports.
 - Use only what the reports say. Do not add facts, figures or dates from memory.
 - A report marked as having no data tells you nothing in either direction.

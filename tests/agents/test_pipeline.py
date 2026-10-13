@@ -109,7 +109,7 @@ def verdict(*refs: str, rating: str = "overweight") -> str:
         {
             "rating": rating,
             "confidence": 0.6,
-            "evidence": [{"claim": "Demand is strong.", "direction": "supports", "refs": list(refs)}],
+            "evidence": [{"claim": "Demand is strong.", "direction": "bullish", "refs": list(refs)}],
             "rationale": "The news leans positive.",
         }
     )

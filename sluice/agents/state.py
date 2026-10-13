@@ -95,7 +95,8 @@ class Turn(BaseModel):
 
 class Evidence(BaseModel):
     claim: str = Field(min_length=1)
-    direction: Literal["supports", "opposes"]  # relative to the rating
+    # What the claim says about the stock, whatever the rating.
+    direction: Literal["bullish", "bearish"]
     refs: list[str] = Field(min_length=1)
 
 
