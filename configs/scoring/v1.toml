@@ -1,0 +1,60 @@
+# Jev scoring problem spec, version 1. A change to a version that has been run is a new file.
+#
+# Question shape follows TypeSafe's actual /v1/systemone schema (docs/specs/02-scoring.md,
+# "已确认（2026-10-18，任务 3.3 前置调研）"): noul takes no criteria (a single truth-condition
+# statement in instructions, answered with a 0-1 probability and no separate confidence); choice
+# takes criteria as an {option: description} map and answers with choice + probabilities + confidence.
+
+model = "jev-1.13.0"  # pinned; "jev-latest" would let thresholds drift silently on a model upgrade
+novelty_reference_k = 15  # top-K most similar past headlines for the same ticker, by lightweight similarity
+
+[questions.relevance]
+type = "noul"
+instructions = """
+This news item is directly and specifically about the company identified by the ticker (its own \
+results, products, management, litigation or contracts) rather than only about its industry, \
+sector or peers in general.
+"""
+
+[questions.stance]
+type = "choice"
+instructions = """
+Given only this news item, is it good, bad, or neither for the company's stock over the next two \
+weeks? Judge the news itself, not how the market may have already reacted.
+"""
+[questions.stance.criteria]
+bullish = "the item describes something that, taken at face value, should help the business or its outlook."
+bearish = "the item describes something that, taken at face value, should hurt the business or its outlook."
+neutral = "informational with no clear direction, or the positive and negative parts cancel out."
+
+[questions.novelty]
+type = "noul"
+instructions = """
+You are given this news item's headline and, when available, a list of recent headlines about the \
+same company published before it. This headline reports something not already covered by any of \
+the listed headlines, rather than mainly restating, updating by a small amount, or reprinting one \
+of them.
+"""
+
+[questions.rumour]
+type = "noul"
+instructions = """
+This news item presents its central claim as a rumour, speculation, or something attributed only \
+to unnamed or anonymous sources, rather than as a confirmed fact (an official filing, press \
+release, or on-record statement).
+"""
+
+[questions.event_type]
+type = "choice"
+instructions = """
+Classify the main event this news item reports, using only the categories given.
+"""
+[questions.event_type.criteria]
+earnings = "a reported quarterly/annual results release."
+guidance = "a forward-looking outlook or forecast given by the company."
+m_and_a = "a merger, acquisition, divestiture or stake change."
+regulatory = "a regulatory, legal or compliance action (investigation, lawsuit, approval, fine)."
+contract_product = "a new contract, partnership, product launch or recall."
+analyst_action = "a sell-side rating, price target or estimate change."
+macro = "a macroeconomic, industry-wide or market-wide event affecting the company only indirectly."
+other = "none of the above fit."
