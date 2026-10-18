@@ -16,6 +16,7 @@ TIMEOUT = 60  # seconds
 # Default retries per answer, shared with the DeepSeek client for consistency.
 RETRIES = 2
 RETRY_WAITS = (2.0, 4.0)
+PRICE_PER_MILLION_INPUT = 0.042  # USD; output tokens are free
 
 
 class JevError(RuntimeError):

@@ -255,6 +255,82 @@ def batch(
         raise typer.Exit(code=1)
 
 
+@app.command("score")
+def score(
+    tickers: Annotated[
+        str, typer.Option("--tickers", help="Comma-separated tickers to score.")
+    ] = ",".join(COMPANIES),
+    config_version: Annotated[
+        str, typer.Option("--config", help="Scoring config version under configs/scoring/.")
+    ] = "v1",
+    db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
+    scores_db: Annotated[
+        Path, typer.Option("--scores-db", help="SQLite score store.")
+    ] = Path("data/local/scores.db"),
+    workers: Annotated[int, typer.Option("--workers", help="Jev calls going on at a time.")] = 4,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Score at most this many new items.")
+    ] = None,
+) -> None:
+    """Score stored news with Jev. Interrupt and rerun freely: it resumes."""
+    import os
+
+    from rich.progress import Progress
+
+    from sluice.agents.cache import CallCache
+    from sluice.news.store import NewsStore
+    from sluice.scoring.client import ENV_KEY, PRICE_PER_MILLION_INPUT, CachedJev, JevClient
+    from sluice.scoring.config import load_scoring_config
+    from sluice.scoring.score import score_all
+    from sluice.scoring.store import ScoreStore
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+
+    config = load_scoring_config(config_version)
+    symbols = [t for t in tickers.split(",") if t.strip()]
+    console = Console()
+    counts = {"scored": 0, "skipped": 0, "done": 0, "error": 0}
+    tokens_in = tokens_out = 0
+
+    with (
+        NewsStore(db) as store,
+        ScoreStore(scores_db) as scores,
+        CallCache() as cache,
+        Progress(console=console) as bar,
+    ):
+        jev = CachedJev(cache, JevClient(key))
+        task = bar.add_task("scoring", total=None)
+
+        def on_done(result) -> None:
+            nonlocal tokens_in, tokens_out
+            counts[result.status] += 1
+            tokens_in += result.input_tokens
+            tokens_out += result.output_tokens
+            if result.status == "error":
+                bar.console.print(
+                    f"error: news {result.news_id} ({result.ticker}): {result.detail}",
+                    markup=False,
+                )
+            bar.advance(task)
+
+        score_all(symbols, store, scores, config, jev, workers=workers, limit=limit, on_done=on_done)
+
+    console.print(
+        f"scored {counts['scored']}, skipped {counts['skipped']}, "
+        f"already done {counts['done']}, errors {counts['error']}"
+    )
+    console.print(
+        f"  {tokens_in:,} in, {tokens_out:,} out, "
+        f"about ${tokens_in * PRICE_PER_MILLION_INPUT / 1_000_000:.4f} at peak list prices"
+    )
+    if counts["error"]:
+        typer.echo("Some items failed. Rerun to continue.", err=True)
+        raise typer.Exit(code=1)
+
+
 @fundamentals_app.command("fetch")
 def fundamentals_fetch(
     tickers: Annotated[

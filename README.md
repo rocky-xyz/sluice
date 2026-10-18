@@ -109,6 +109,7 @@ sluice fundamentals fetch                # quarterly statements from Alpha Vanta
 sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
 sluice analyze TSLA                      # or as of now, for any ticker: collects its news first
 sluice batch                             # backtest the universe on every tenth trading day (resumable)
+sluice score                             # score stored news with Jev (needs TYPESAFE_API_KEY; resumable)
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
