@@ -113,14 +113,20 @@ def _published_at(raw: dict) -> datetime | None:
 
 
 def parse_item(
-    raw: dict, ticker: str, fetched_at: datetime, location: str | None = None
+    raw: dict,
+    ticker: str,
+    fetched_at: datetime,
+    location: str | None = None,
+    page_publisher: str | None = None,
 ) -> NewsItem | None:
     """Turn one raw item into a NewsItem, or None when it has no headline.
 
     Finnhub's "source" is the publisher, except for aggregators. For those the
     publisher is read from `location`, the address the article's link leads to,
-    when it is known and is the publisher's own site. "url" stays the Finnhub
-    redirect: it identifies the article whether or not its link was followed.
+    when it is known and is the publisher's own site. Still unknown, it falls
+    back to `page_publisher`, the name read from the Yahoo page the link lands
+    on. "url" stays the Finnhub redirect: it identifies the article whether or
+    not its link was followed.
     """
     title = (raw.get("headline") or "").strip()
     if not title:
@@ -134,7 +140,8 @@ def parse_item(
             publisher_for(location)
             if raw.get("source") in AGGREGATORS
             else raw.get("source") or None
-        ),
+        )
+        or page_publisher,
         source=SOURCE,
         tickers=[canonical(ticker)],
         published_at=published_at,
@@ -157,11 +164,15 @@ def archive(raw_dir: Path, ticker: str, fetched_at: datetime, items: Iterable[di
 
 def import_archive(raw_dir: Path, store: NewsStore) -> ImportResult:
     from sluice.news.finnhub_links import load_links
+    from sluice.news.yahoo_publishers import load_publishers
 
     links = load_links(raw_dir)
+    pages = load_publishers(raw_dir)
 
     def parse(raw: dict, ticker: str, fetched_at: datetime) -> NewsItem | None:
-        return parse_item(raw, ticker, fetched_at, links.get(raw.get("id")))
+        return parse_item(
+            raw, ticker, fetched_at, links.get(raw.get("id")), pages.get(raw.get("url"))
+        )
 
     return import_files(archive_files(raw_dir, SOURCE), parse, store)
 

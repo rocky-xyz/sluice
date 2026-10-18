@@ -104,6 +104,7 @@ sluice news collect --tickers NVDA,AMD   # or for chosen tickers
 sluice news collect --source all         # Yahoo Finance and Finnhub (needs FINNHUB_API_KEY)
 sluice news backfill                     # archive a year of Finnhub company news (resumable)
 sluice news resolve-links                # record where Finnhub's article links lead (resumable)
+sluice news resolve-publishers           # read the publisher named on Yahoo-hosted article pages (resumable)
 sluice news import                       # rebuild the store from the raw archive
 sluice fundamentals fetch                # quarterly statements from Alpha Vantage (resumable; 25 calls a day)
 sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
@@ -116,7 +117,10 @@ sluice score                             # score stored news with Jev (needs TYP
 responses as JSONL. `news backfill` archives history from Finnhub, one ticker
 and one day per request, and resumes where it stopped. `news resolve-links`
 follows Finnhub's redirect links to learn the original address, and with it the
-publisher, of articles that Finnhub only attributes to an aggregator. `news import` loads
+publisher, of articles that Finnhub only attributes to an aggregator. For those
+whose link lands back on a Yahoo page, `news resolve-publishers` reads the
+publisher that page names in its metadata; it keeps only that name, not the
+page. `news import` loads
 archived items from every source into the store, so the database can always be
 rebuilt. Reprints (same headline within 12 hours) are grouped: a query returns
 each story once, with a reprint count as of the decision time, its publisher

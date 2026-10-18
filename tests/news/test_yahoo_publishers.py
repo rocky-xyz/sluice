@@ -3,15 +3,18 @@ from datetime import UTC, datetime
 
 import requests
 
+from sluice.news import finnhub
 from sluice.news.store import NewsStore
 from sluice.news.yahoo_publishers import (
     RATE_LIMIT_WAITS,
     ResolveResult,
+    load_publishers,
     provider_from_html,
     resolve_publishers,
 )
 
 NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+LATER = datetime(2027, 1, 1, tzinfo=UTC)
 
 
 def page(provider: str | None = "GuruFocus.com") -> str:
@@ -108,7 +111,7 @@ def test_a_network_failure_is_left_for_the_next_run(tmp_path):
         assert asked == ["fails"]
 
 
-def test_an_already_attempted_id_is_not_fetched_again(tmp_path):
+def test_an_already_attempted_url_is_not_fetched_again(tmp_path):
     with NewsStore(tmp_path / "news.db") as store:
         store.add([_item(1)])
         article_id = next(iter(store.missing_publisher_urls("finnhub")))
@@ -183,7 +186,65 @@ def test_concurrency_does_not_corrupt_the_attempt_log(tmp_path):
             store, candidates, lambda url: (asked.append(url), (200, page("Benzinga")))[1],
             tmp_path, workers=5,
         )
-    assert asked == []  # every id from the first run was logged exactly once
+    assert asked == []  # every url from the first run was logged exactly once
+
+
+# --- the attempt log survives a rebuild ---
+
+
+def test_attempts_are_logged_by_url_not_by_database_id(tmp_path):
+    with NewsStore(tmp_path / "news.db") as store:
+        store.add([_item(1), _item(2)])
+        candidates = store.missing_publisher_urls("finnhub")
+        run(store, candidates, _benzinga_except_2, tmp_path)
+    assert load_publishers(tmp_path) == {
+        "https://finnhub.io/api/news?id=1": "Benzinga",
+        "https://finnhub.io/api/news?id=2": None,
+    }
+
+
+def test_a_store_rebuilt_from_the_archive_gets_its_publishers_back(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raws = [_raw(1), _raw(2), _raw(3, source="Reuters")]
+    finnhub.archive(raw_dir, "NVDA", NOW, raws)
+    with NewsStore(tmp_path / "first.db") as store:
+        finnhub.import_archive(raw_dir, store)
+        candidates = store.missing_publisher_urls("finnhub")
+        run(store, candidates, _benzinga_except_2, raw_dir)
+
+    with NewsStore(tmp_path / "rebuilt.db") as store:
+        finnhub.import_archive(raw_dir, store)
+        rows = {r.title: r.publisher for r in store.query("NVDA", before=LATER)}
+        assert rows == {"Headline 1": "Benzinga", "Headline 2": None, "Headline 3": "Reuters"}
+        # nothing left that was not already tried
+        asked = []
+        left = store.missing_publisher_urls("finnhub")
+        run(store, left, lambda url: (asked.append(url), (200, ""))[1], raw_dir)
+        assert asked == []
+
+
+def test_a_page_publisher_never_overrides_a_known_one():
+    raw = _raw(1, source="Reuters")
+    assert finnhub.parse_item(raw, "NVDA", NOW, page_publisher="Benzinga").publisher == "Reuters"
+    linked = finnhub.parse_item(
+        _raw(1), "NVDA", NOW, "https://www.fool.com/a/", page_publisher="Benzinga"
+    )
+    assert linked.publisher == "Motley Fool"
+
+
+def _benzinga_except_2(url: str) -> tuple[int, str]:
+    return 200, page(None if url.endswith("2") else "Benzinga")
+
+
+def _raw(n: int, source: str = "Yahoo") -> dict:
+    return {
+        "datetime": int(NOW.timestamp()) - 3600,
+        "headline": f"Headline {n}",
+        "id": n,
+        "source": source,
+        "summary": "Summary.",
+        "url": f"https://finnhub.io/api/news?id={n}",
+    }
 
 
 def _item(n: int):

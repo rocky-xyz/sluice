@@ -603,8 +603,9 @@ def news_resolve_links(
 def news_resolve_publishers(
     db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
     raw_dir: Annotated[
-        Path, typer.Option("--raw-dir", help="Where the attempt log is kept.")
-    ] = Path("data/local/raw"),
+        Path,
+        typer.Option("--raw-dir", help="Raw archive the attempt log is kept in; import reads it."),
+    ] = Path("data/raw"),
     limit: Annotated[
         int | None, typer.Option("--limit", help="Fetch at most this many pages.")
     ] = None,
