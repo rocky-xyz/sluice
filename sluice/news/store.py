@@ -240,6 +240,23 @@ class NewsStore:
             params["limit"] = limit
         return [_to_stored(row) for row in self._conn.execute(sql, params)]
 
+    def missing_publisher_urls(self, source: str) -> dict[int, str]:
+        """Id -> url for every article from `source` with no publisher yet and a url to try."""
+        rows = self._conn.execute(
+            "SELECT id, url FROM articles WHERE source = ? AND publisher IS NULL AND url IS NOT NULL",
+            (source,),
+        )
+        return {row["id"]: row["url"] for row in rows}
+
+    def fill_publisher(self, article_id: int, publisher: str) -> bool:
+        """Set a still-missing publisher. Returns whether it was empty and got set."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE articles SET publisher = ? WHERE id = ? AND publisher IS NULL",
+                (publisher, article_id),
+            )
+        return cursor.rowcount > 0
+
 
 def _to_stored(row: sqlite3.Row) -> StoredNews:
     published_at = parse_utc(row["published_at"]) if row["published_at"] else None

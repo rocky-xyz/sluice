@@ -14,6 +14,8 @@ news_app = typer.Typer(help="News collection and storage.", no_args_is_help=True
 app.add_typer(news_app, name="news")
 fundamentals_app = typer.Typer(help="Financial statements.", no_args_is_help=True)
 app.add_typer(fundamentals_app, name="fundamentals")
+calibration_app = typer.Typer(help="Hand-labeling Jev's scores against a sample.", no_args_is_help=True)
+app.add_typer(calibration_app, name="calibration")
 
 
 def _version(value: bool) -> None:
@@ -331,6 +333,118 @@ def score(
         raise typer.Exit(code=1)
 
 
+@calibration_app.command("sample")
+def calibration_sample(
+    tickers: Annotated[
+        str, typer.Option("--tickers", help="Comma-separated tickers to sample from.")
+    ] = ",".join(COMPANIES),
+    config_version: Annotated[
+        str, typer.Option("--config", help="Scoring config version under configs/scoring/.")
+    ] = "v1",
+    n: Annotated[int, typer.Option("--n", help="How many items to sample.")] = 50,
+    seed: Annotated[int, typer.Option("--seed", help="Sampling seed.")] = 0,
+    db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
+    scores_db: Annotated[
+        Path, typer.Option("--scores-db", help="SQLite score store.")
+    ] = Path("data/local/scores.db"),
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", help="Where the review and answer files go.")
+    ] = Path("data/local/calibration"),
+) -> None:
+    """Sample scored news for hand-labeling, spread across Jev's event types."""
+    import json
+
+    from sluice.news.store import NewsStore
+    from sluice.scoring.calibration import build_review, candidates, stratified_sample
+    from sluice.scoring.config import load_scoring_config
+    from sluice.scoring.store import ScoreStore
+
+    config = load_scoring_config(config_version)
+    symbols = [t for t in tickers.split(",") if t.strip()]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    review_path = out_dir / f"{config_version}_review.md"
+    answers_path = out_dir / f"{config_version}_answers.json"
+
+    with NewsStore(db) as store, ScoreStore(scores_db) as scores:
+        pool = candidates(symbols, store, scores, config)
+        chosen = stratified_sample(pool, n, seed)
+        text, answers = build_review(chosen)
+
+    review_path.write_text(text)
+    answers_path.write_text(
+        json.dumps({str(i): s.model_dump() for i, s in answers.items()}, indent=2) + "\n"
+    )
+    Console().print(
+        f"sampled {len(chosen)} of {len(pool)} scored items\n"
+        f"fill in the blanks in {review_path}\n"
+        f"do not open {answers_path} until you are done -- it holds Jev's own scores"
+    )
+
+
+@calibration_app.command("report")
+def calibration_report(
+    config_version: Annotated[
+        str, typer.Option("--config", help="Scoring config version the sample was drawn from.")
+    ] = "v1",
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", help="Where the review and answer files are.")
+    ] = Path("data/local/calibration"),
+    bins: Annotated[int, typer.Option("--bins", help="Reliability-diagram buckets.")] = 5,
+) -> None:
+    """Compare your filled-in labels against Jev's scores."""
+    import json
+
+    from sluice.scoring.calibration import choice_bins, noul_bins, parse_review
+    from sluice.scoring.store import ItemScores
+
+    review_path = out_dir / f"{config_version}_review.md"
+    answers_path = out_dir / f"{config_version}_answers.json"
+    labels = parse_review(review_path.read_text())
+    answers = {
+        int(i): ItemScores(**s) for i, s in json.loads(answers_path.read_text()).items()
+    }
+
+    console = Console()
+
+    def noul_table(title: str, pairs: list[tuple[float, bool]]) -> None:
+        table = Table(title=title)
+        table.add_column("Jev's mean score")
+        table.add_column("human-observed rate")
+        table.add_column("n")
+        for predicted, observed, count in noul_bins(pairs, bins):
+            table.add_row(f"{predicted:.2f}", f"{observed:.2f}", str(count))
+        console.print(table)
+
+    def choice_table(title: str, triples: list[tuple[bool, float]]) -> None:
+        table = Table(title=title)
+        table.add_column("Jev's mean confidence")
+        table.add_column("accuracy")
+        table.add_column("n")
+        for confidence, accuracy, count in choice_bins(triples, bins):
+            table.add_row(f"{confidence:.2f}", f"{accuracy:.2f}", str(count))
+        console.print(table)
+
+    noul_table(
+        "relevance", [(answers[i].relevance, labels[i].relevant) for i in labels]
+    )
+    noul_table("novelty", [(answers[i].novelty, labels[i].novel) for i in labels])
+    noul_table("rumour", [(answers[i].rumour, labels[i].rumour) for i in labels])
+    choice_table(
+        "stance",
+        [
+            (answers[i].stance == labels[i].stance, answers[i].stance_confidence)
+            for i in labels
+        ],
+    )
+    choice_table(
+        "event_type",
+        [
+            (answers[i].event_type == labels[i].event_type, answers[i].event_type_confidence)
+            for i in labels
+        ],
+    )
+
+
 @fundamentals_app.command("fetch")
 def fundamentals_fetch(
     tickers: Annotated[
@@ -479,6 +593,44 @@ def news_resolve_links(
     Console().print(
         f"pending {result.pending}, resolved {result.resolved}, dead {result.dead}, "
         f"failed {result.failed}"
+    )
+    if result.aborted:
+        typer.echo(f"Stopped: {result.aborted}. Rerun to continue.", err=True)
+        raise typer.Exit(code=1)
+
+
+@news_app.command("resolve-publishers")
+def news_resolve_publishers(
+    db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
+    raw_dir: Annotated[
+        Path, typer.Option("--raw-dir", help="Where the attempt log is kept.")
+    ] = Path("data/local/raw"),
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Fetch at most this many pages.")
+    ] = None,
+    workers: Annotated[int, typer.Option("--workers", help="Pages fetched at a time.")] = 1,
+) -> None:
+    """Read Yahoo-hosted articles' own pages for their true publisher. Resumable."""
+    from rich.progress import Progress
+
+    from sluice.news.store import NewsStore
+    from sluice.news.yahoo_publishers import resolve_publishers
+
+    with NewsStore(db) as store:
+        candidates = store.missing_publisher_urls("finnhub")
+        with Progress() as bar:
+            task = bar.add_task("pages", total=None)
+            result = resolve_publishers(
+                store,
+                candidates,
+                raw_dir,
+                limit=limit,
+                workers=workers,
+                on_step=lambda done, total: bar.update(task, completed=done, total=total),
+            )
+    Console().print(
+        f"pending {result.pending}, found {result.found}, no provider {result.no_provider}, "
+        f"dead {result.dead}, failed {result.failed}"
     )
     if result.aborted:
         typer.echo(f"Stopped: {result.aborted}. Rerun to continue.", err=True)

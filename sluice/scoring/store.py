@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Self
@@ -152,22 +153,34 @@ class ScoreStore:
                 "SELECT * FROM scores WHERE news_id = ? AND config_version = ? AND skipped IS NULL",
                 (news_id, config_version),
             ).fetchone()
-        if row is None:
-            return None
-        return ItemScores(
-            relevance=row["relevance"],
-            stance=row["stance"],
-            stance_confidence=row["stance_confidence"],
-            stance_probabilities=json.loads(row["stance_probabilities"]),
-            novelty=row["novelty"],
-            rumour=row["rumour"],
-            event_type=row["event_type"],
-            event_type_confidence=row["event_type_confidence"],
-            event_type_probabilities=json.loads(row["event_type_probabilities"]),
-            input_tokens=row["input_tokens"],
-            output_tokens=row["output_tokens"],
-        )
+        return None if row is None else _row_to_scores(row)
+
+    def iter_all(self, config_version: str) -> Iterator[tuple[int, ItemScores]]:
+        """Every scored (not skipped) item under this version, in no particular order."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM scores WHERE config_version = ? AND skipped IS NULL",
+                (config_version,),
+            ).fetchall()
+        for row in rows:
+            yield row["news_id"], _row_to_scores(row)
 
     def __len__(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT count(*) FROM scores").fetchone()[0]
+
+
+def _row_to_scores(row: sqlite3.Row) -> ItemScores:
+    return ItemScores(
+        relevance=row["relevance"],
+        stance=row["stance"],
+        stance_confidence=row["stance_confidence"],
+        stance_probabilities=json.loads(row["stance_probabilities"]),
+        novelty=row["novelty"],
+        rumour=row["rumour"],
+        event_type=row["event_type"],
+        event_type_confidence=row["event_type_confidence"],
+        event_type_probabilities=json.loads(row["event_type_probabilities"]),
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+    )

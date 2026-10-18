@@ -201,3 +201,20 @@ def test_a_later_copy_fills_gaps_but_never_overwrites(store):
     store.add([make(1, summary="Now with a summary", publisher="Someone else", title="Changed")])
     (row,) = store.query("NVDA", before=T)
     assert (row.summary, row.publisher, row.title) == ("Now with a summary", "Reuters", "Headline 1")
+
+
+def test_missing_publisher_urls_lists_only_unpublished_articles_of_that_source(store):
+    store.add([make(1, source="finnhub", publisher=None), make(2, source="finnhub", publisher="Reuters")])
+    store.add([make(3, source="yfinance", publisher=None)])
+    ids = store.missing_publisher_urls("finnhub")
+    assert len(ids) == 1
+    assert next(iter(ids.values())) == "https://example.com/a/1"
+
+
+def test_fill_publisher_sets_it_only_once(store):
+    store.add([make(1, publisher=None)])
+    (article_id,) = store.missing_publisher_urls("yfinance")
+    assert store.fill_publisher(article_id, "Benzinga") is True
+    assert store.fill_publisher(article_id, "Someone else") is False
+    (row,) = store.query("NVDA", before=T)
+    assert row.publisher == "Benzinga"
