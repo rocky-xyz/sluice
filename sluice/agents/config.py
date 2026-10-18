@@ -12,6 +12,11 @@ class NewsConfig(BaseModel):
 
     lookback_days: int = Field(gt=0)
     max_items: int = Field(gt=0)
+    # Weighted news (docs/specs/07-agent-pipeline.md, task 5.1). Off by default, so a
+    # config file written before it means what it always meant.
+    weighted: bool = False
+    min_relevance: float = Field(default=0.5, ge=0, le=1)  # Jev relevance below it is left out
+    scoring_config: str = "v1"  # whose scores and weight tables are used
 
 
 class PricesConfig(BaseModel):

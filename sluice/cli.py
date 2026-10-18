@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -31,6 +33,35 @@ def main(
     ),
 ) -> None:
     load_dotenv()  # API keys live in a local .env; real environment variables win
+
+
+@contextmanager
+def _weighting(config, cache) -> Iterator:
+    """Scores, Jev and weight tables for a config that weights news; None when it does not."""
+    import os
+
+    if not config.news.weighted:
+        yield None
+        return
+    from sluice.agents.prefetch import Weighting
+    from sluice.news.weight_tables import DEFAULT_ROOT, load_all
+    from sluice.scoring.client import ENV_KEY, CachedJev, JevClient
+    from sluice.scoring.config import load_scoring_config
+    from sluice.scoring.store import ScoreStore
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        reason = f"config {config.version} weights news"
+        typer.echo(f"{ENV_KEY} is not set (put it in .env): {reason}.", err=True)
+        raise typer.Exit(code=2)
+    scoring = load_scoring_config(config.news.scoring_config)
+    with ScoreStore() as scores:
+        yield Weighting(
+            scores=scores,
+            tables=load_all(DEFAULT_ROOT, scoring.version),
+            scoring=scoring,
+            jev=CachedJev(cache, JevClient(key)),
+        )
 
 
 @app.command("analyze")
@@ -89,7 +120,12 @@ def analyze(
 
     checkpointer = open_checkpointer()
     try:
-        with NewsStore(db) as store, PriceStore(fetch=fetch_bars) as prices, CallCache() as cache:
+        with (
+            NewsStore(db) as store,
+            PriceStore(fetch=fetch_bars) as prices,
+            CallCache() as cache,
+            _weighting(config, cache) as weighting,
+        ):
 
             def collect_news(symbol: str) -> str | None:
                 return yahoo.collect([symbol], store, raw_dir=Path("data/local/raw"))[0].error
@@ -104,7 +140,9 @@ def analyze(
                 return result.stopped or next(iter(result.failed), None)
 
             llm = CachedLLM(cache, DeepSeekClient(key))
-            deps = Deps(store, prices, statements, llm, config, collect_news, fetch_statements)
+            deps = Deps(
+                store, prices, statements, llm, config, collect_news, fetch_statements, weighting
+            )
             graph = build_graph(deps, checkpointer)
             state = run(graph, config, ticker, decision_time, repeat=repeat, mode=mode)
     finally:
@@ -121,6 +159,11 @@ def analyze(
         f"{meta.run_id}  price indicators: {len(inputs.prices)} (as of {inputs.prices_as_of}), "
         f"news items: {len(inputs.news)}, fundamentals: {len(inputs.fundamentals)}"
     )
+    for signal in inputs.signals:
+        console.print(
+            f"  {signal.ref}: {signal.value:+.2e} over {signal.n_items} scored items "
+            f"(weights as of {signal.weights_as_of:%Y-%m-%d})"
+        )
     for gap in inputs.gaps:
         console.print(f"  gap in {gap.kind}: {gap.reason}", markup=False)
     for call in state.get("usage", []):
@@ -167,7 +210,10 @@ def batch(
         Path, typer.Option("--out-dir", help="Where run states and the ratings file go.")
     ] = Path("data/local/runs"),
     allow_gaps: Annotated[
-        bool, typer.Option("--allow-gaps", help="Run even when statements or prices are missing.")
+        bool,
+        typer.Option(
+            "--allow-gaps", help="Run even when statements, prices or weight tables are missing."
+        ),
     ] = False,
 ) -> None:
     """Backtest a grid of tickers and decision days. Interrupt and rerun freely: it resumes."""
@@ -205,8 +251,15 @@ def batch(
     opened: list[NewsStore] = []
     console = Console()
     try:
-        with PriceStore(fetch=fetch_bars) as prices, CallCache() as cache:
-            problems = batching.unprepared(cells, statements, prices, config.prices.benchmark)
+        with (
+            PriceStore(fetch=fetch_bars) as prices,
+            CallCache() as cache,
+            _weighting(config, cache) as weighting,
+        ):
+            tables = weighting.tables if weighting else None
+            problems = batching.unprepared(
+                cells, statements, prices, config.prices.benchmark, tables
+            )
             for problem in problems:
                 typer.echo(f"Not ready: {problem}", err=True)
             if problems and not allow_gaps:
@@ -218,7 +271,8 @@ def batch(
                 # One news store per worker: its connection serves one run at a time.
                 store = NewsStore(db)
                 opened.append(store)
-                return build_graph(Deps(store, prices, statements, llm, config), checkpointer)
+                deps = Deps(store, prices, statements, llm, config, weighting=weighting)
+                return build_graph(deps, checkpointer)
 
             console.print(
                 f"{len(cells)} runs: {len({c.ticker for c in cells})} tickers, {len(days)} days "

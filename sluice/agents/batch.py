@@ -15,6 +15,7 @@ from sluice.agents.prefetch import backtest_decision_time
 from sluice.agents.state import PipelineState, dump_state
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.market_calendar import close_of
+from sluice.news.weight_tables import StoredTable, latest_before
 from sluice.prices.store import PriceStore
 from sluice.universe import canonical
 
@@ -74,12 +75,17 @@ def grid(tickers: Iterable[str], days: Iterable[date], repeats: int = 1) -> list
 
 
 def unprepared(
-    cells: Iterable[Cell], statements: FundamentalsStore, prices: PriceStore, benchmark: str
+    cells: Iterable[Cell],
+    statements: FundamentalsStore,
+    prices: PriceStore,
+    benchmark: str,
+    weight_tables: list[StoredTable] | None = None,
 ) -> list[str]:
     """What is missing for a batch to run without avoidable gaps.
 
-    A run that lacks statements or prices still finishes, and a finished run is
-    never run again; so the gap would stay in the results for good.
+    A run that lacks statements, prices or (for weighted news, when
+    `weight_tables` is given) a weight table still finishes, and a finished
+    run is never run again; so the gap would stay in the results for good.
     """
     cells = list(cells)
     if not cells:
@@ -96,6 +102,12 @@ def unprepared(
         bars = prices.history(ticker, last, limit=1)
         if not bars or bars[-1].day < last:
             problems.append(f"{ticker}: no prices up to {last}")
+    if weight_tables is not None:
+        days = sorted({cell.day for cell in cells})
+        bare = [d for d in days if latest_before(weight_tables, backtest_decision_time(d)) is None]
+        if bare:
+            listed = ", ".join(str(d) for d in bare)
+            problems.append(f"no weight table fitted by {listed} (sluice news fit-weights)")
     return problems
 
 

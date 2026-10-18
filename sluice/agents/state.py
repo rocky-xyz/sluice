@@ -6,6 +6,7 @@ from typing import Annotated, Literal, TypedDict
 from pydantic import AwareDatetime, BaseModel, Field
 
 from sluice.news.models import Session
+from sluice.news.signal import Record
 from sluice.news.timeutil import to_utc
 
 RunMode = Literal["backtest", "adhoc"]
@@ -15,8 +16,9 @@ Side = Literal["bull", "bear"]
 GapKind = Literal["prices", "news", "fundamentals"]
 FigureUnit = Literal["amount", "ratio", "points", "multiple"]
 
-# How a source is cited in a report: [N48213], [P:rsi14], [F:revenue_q] or [N1, N2].
-_REF = r"(?:N\d+|[PF]:\w+)"
+# How a source is cited in a report: [N48213], [P:rsi14], [F:revenue_q], [S:news_signal]
+# or several at once, [N1, N2].
+_REF = r"(?:N\d+|[PFS]:\w+)"
 _CITATION = re.compile(rf"\[({_REF}(?:\s*,\s*{_REF})*)\]")
 
 
@@ -32,6 +34,10 @@ class Meta(BaseModel):
     failure: str | None = None
 
 
+def _absent(value: object) -> bool:
+    return value is None or value == []
+
+
 class NewsInput(BaseModel):
     """One news item exactly as the news analyst saw it."""
 
@@ -42,6 +48,22 @@ class NewsInput(BaseModel):
     published_at: AwareDatetime
     session: Session | None
     reprint_count: int
+    # Only in a weighted run (docs/specs/07-agent-pipeline.md, task 5.1). Left out of
+    # the saved state when absent, so an unweighted run's state is as it always was.
+    scored: bool | None = Field(default=None, exclude_if=_absent)  # False: Jev could not score it
+    relevance: float | None = Field(default=None, exclude_if=_absent)
+    event_type: str | None = Field(default=None, exclude_if=_absent)
+    source_record: Record | None = Field(default=None, exclude_if=_absent)  # None: no weight table
+    type_record: Record | None = Field(default=None, exclude_if=_absent)
+
+
+class SignalInput(BaseModel):
+    """A number computed by code from the news, exactly as the news analyst saw it."""
+
+    ref: str  # "S:" + the signal's name
+    value: float
+    n_items: int  # scored items it was computed from
+    weights_as_of: AwareDatetime  # the weight table it used
 
 
 class PriceInput(BaseModel):
@@ -77,9 +99,11 @@ class Inputs(BaseModel):
     news: list[NewsInput] = []
     fundamentals: list[FundamentalInput] = []
     gaps: list[Gap] = []
+    signals: list[SignalInput] = Field(default=[], exclude_if=_absent)  # weighted runs only
 
     def refs(self) -> set[str]:
-        return {item.ref for item in (*self.prices, *self.news, *self.fundamentals)}
+        items = (*self.prices, *self.news, *self.fundamentals, *self.signals)
+        return {item.ref for item in items}
 
 
 class Report(BaseModel):
@@ -150,6 +174,7 @@ STATE_MODELS = (
     Meta,
     PriceInput,
     NewsInput,
+    SignalInput,
     FundamentalInput,
     Gap,
     Inputs,

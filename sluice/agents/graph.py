@@ -13,7 +13,7 @@ from langgraph.graph.state import CompiledStateGraph
 from sluice.agents import roles
 from sluice.agents.config import PipelineConfig
 from sluice.agents.llm import CachedLLM
-from sluice.agents.prefetch import prefetch
+from sluice.agents.prefetch import Weighting, prefetch
 from sluice.agents.state import STATE_MODELS, Gap, Meta, PipelineState, RunMode, make_run_id
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.store import NewsStore
@@ -29,7 +29,8 @@ class Deps:
 
     The two callables are only used by an ad-hoc run, before it pre-fetches:
     they bring in what the stores lack for a ticker nobody collected, and
-    return the reason when they could not.
+    return the reason when they could not. `weighting` is only used, and then
+    needed, when the config weights news.
     """
 
     store: NewsStore
@@ -39,6 +40,7 @@ class Deps:
     config: PipelineConfig
     collect_news: Callable[[str], str | None] | None = None
     fetch_statements: Callable[[str], str | None] | None = None
+    weighting: Weighting | None = None
 
 
 def build_graph(
@@ -71,7 +73,13 @@ def build_graph(
             ):
                 failures.append(Gap(kind="fundamentals", reason=f"fetch failed: {error}"))
         inputs = prefetch(
-            deps.store, deps.prices, deps.statements, meta.ticker, meta.decision_time, deps.config
+            deps.store,
+            deps.prices,
+            deps.statements,
+            meta.ticker,
+            meta.decision_time,
+            deps.config,
+            deps.weighting,
         )
         return {"inputs": inputs.model_copy(update={"gaps": [*failures, *inputs.gaps]})}
 

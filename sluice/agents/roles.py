@@ -13,6 +13,7 @@ from sluice.agents.state import (
     PriceInput,
     Report,
     Side,
+    SignalInput,
     Turn,
     Verdict,
     cited_refs,
@@ -166,21 +167,37 @@ def _news_line(item: NewsInput) -> str:
         facts.append(f"session: {item.session}")
     if item.reprint_count:
         facts.append(f"reprints: {item.reprint_count}")
+    # Only a weighted run has these; relevance only chose the items and is not shown.
+    if item.scored is False:
+        facts.append("not scored")
+    if item.event_type:
+        facts.append(f"type: {item.event_type}")
+    if item.source_record:
+        facts.append(f"source record: {item.source_record}")
+    if item.type_record:
+        facts.append(f"type record: {item.type_record}")
     lines = [f"[{item.ref}] " + " | ".join(facts), item.title]
     if item.summary:
         lines.append(item.summary)
     return "\n".join(lines)
 
 
-def news_prompt(meta: Meta, inputs: Inputs) -> str:
-    return "\n\n".join(
-        [f"{_header(meta)}\n\nNews items:", *(_news_line(item) for item in inputs.news)]
+def _signal_line(signal: SignalInput) -> str:
+    return (
+        f"[{signal.ref}] news signal: {signal.value:+.2e} (relevance-weighted over "
+        f"{signal.n_items} scored items in the window; weights fitted as of "
+        f"{signal.weights_as_of:%Y-%m-%d})"
     )
+
+
+def news_prompt(meta: Meta, inputs: Inputs) -> str:
+    head = [_header(meta), *(_signal_line(signal) for signal in inputs.signals), "News items:"]
+    return "\n\n".join(["\n\n".join(head), *(_news_line(item) for item in inputs.news)])
 
 
 def news_analyst(state: PipelineState, llm: CachedLLM, config: PipelineConfig) -> dict:
     meta, inputs = state["meta"], state["inputs"]
-    known = {item.ref for item in inputs.news}
+    known = {item.ref for item in (*inputs.news, *inputs.signals)}
     return _analyst(
         state, llm, config, NEWS_ANALYST, known, news_prompt(meta, inputs), "No news was available."
     )
