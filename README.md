@@ -106,6 +106,7 @@ sluice news backfill                     # archive a year of Finnhub company new
 sluice news resolve-links                # record where Finnhub's article links lead (resumable)
 sluice news resolve-publishers           # read the publisher named on Yahoo-hosted article pages (resumable)
 sluice news import                       # rebuild the store from the raw archive
+sluice news fit-weights                  # fit and save one source/event-type weight table per month
 sluice fundamentals fetch                # quarterly statements from Alpha Vantage (resumable; 25 calls a day)
 sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
 sluice analyze TSLA                      # or as of now, for any ticker: collects its news first

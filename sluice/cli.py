@@ -638,6 +638,61 @@ def news_resolve_publishers(
         raise typer.Exit(code=1)
 
 
+@news_app.command("fit-weights")
+def news_fit_weights(
+    start: Annotated[
+        str, typer.Option("--from", help="First month to fit, YYYY-MM-DD (its month counts).")
+    ] = "2025-10-01",
+    scoring_config: Annotated[
+        str, typer.Option("--scoring-config", help="Jev scoring config the weights are fitted on.")
+    ] = "v1",
+    db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
+    scores_db: Annotated[
+        Path, typer.Option("--scores-db", help="SQLite score store.")
+    ] = Path("data/local/scores.db"),
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", help="Where the monthly tables are saved.")
+    ] = Path("data/local/news_weights"),
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Refit months already saved, too.")
+    ] = False,
+) -> None:
+    """Fit and save one weight table per month start. Saved months are kept as they are."""
+    from datetime import UTC, date, datetime
+
+    from sluice.news.store import NewsStore
+    from sluice.news.walkforward import monthly_cutoffs, walk_forward_fit
+    from sluice.news.weight_tables import fit_missing
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+    from sluice.scoring.store import ScoreStore
+
+    first = datetime.combine(date.fromisoformat(start), datetime.min.time(), tzinfo=UTC)
+    cutoffs = monthly_cutoffs(first, datetime.now(UTC))
+    with (
+        NewsStore(db) as news,
+        ScoreStore(scores_db) as scores,
+        PriceStore(fetch=fetch_bars) as prices,
+    ):
+        result = fit_missing(
+            cutoffs,
+            out_dir,
+            scoring_config,
+            lambda todo: walk_forward_fit(
+                news, scores, prices, list(COMPANIES), todo, config_version=scoring_config
+            ),
+            refresh=refresh,
+        )
+
+    def days(moments: list[datetime]) -> str:
+        return ", ".join(f"{m:%Y-%m-%d}" for m in moments) or "-"
+
+    console = Console()
+    console.print(f"written: {days(result.written)}")
+    console.print(f"kept: {days(result.kept)}")
+    console.print(f"too few rows: {days(result.too_few)}")
+
+
 @news_app.command("backfill")
 def news_backfill(
     start: Annotated[

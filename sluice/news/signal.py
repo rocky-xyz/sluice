@@ -19,11 +19,29 @@ would actually see them in.
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Literal
 
 from sluice.market_calendar import next_open_after
 from sluice.news.store import NewsStore
-from sluice.news.weights import WeightTable, stance_score
+from sluice.news.weights import WeightEstimate, WeightTable, stance_score
 from sluice.scoring.store import ScoreStore
+
+# What a source's or event type's learned weight says, in words an analyst can use
+# (docs/specs/07-agent-pipeline.md, "已确认（任务 5.1）"). The weight multiplies the
+# item's stance score, so its sign says whether the stance came true, not
+# whether the news was good or bad.
+Record = Literal["confirmed", "reversed", "no reliable record", "no record"]
+
+
+def record(estimate: WeightEstimate | None) -> Record:
+    """Confirmed / reversed only when the whole bootstrap interval is above / below 0."""
+    if estimate is None:
+        return "no record"  # the table never saw this source or type
+    if estimate.low > 0:
+        return "confirmed"
+    if estimate.high < 0:
+        return "reversed"
+    return "no reliable record"
 
 
 def item_signal(raw: float, source: str, event_type: str, weights: WeightTable) -> float:

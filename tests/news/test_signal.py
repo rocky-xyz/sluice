@@ -7,6 +7,7 @@ from sluice.news.signal import (
     SignalItem,
     group_by_ticker_day,
     item_signal,
+    record,
     ticker_day_signal,
     ticker_day_signals,
 )
@@ -153,3 +154,14 @@ def test_ticker_day_signals_combines_grouping_and_aggregation(tmp_path):
     # raw = 0.9 - 0.0 = 0.9; combined weight = 0.0 + 0.5; only one item, so the
     # relevance-weighted average is just its own ŷ.
     assert signals == {("NVDA", date(2026, 1, 5)): pytest.approx(0.9 * 0.5)}
+
+
+def test_record_is_confirmed_or_reversed_only_when_the_whole_interval_is_on_one_side():
+    assert record(WeightEstimate(weight=0.01, low=0.002, high=0.02, n=50)) == "confirmed"
+    assert record(WeightEstimate(weight=-0.01, low=-0.02, high=-0.002, n=50)) == "reversed"
+    assert record(WeightEstimate(weight=0.01, low=-0.001, high=0.02, n=50)) == "no reliable record"
+    assert record(WeightEstimate(weight=0.0, low=0.0, high=0.0, n=50)) == "no reliable record"
+
+
+def test_a_source_the_table_never_saw_has_no_record():
+    assert record(None) == "no record"
