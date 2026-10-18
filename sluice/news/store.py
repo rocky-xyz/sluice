@@ -240,6 +240,16 @@ class NewsStore:
             params["limit"] = limit
         return [_to_stored(row) for row in self._conn.execute(sql, params)]
 
+    def get(self, news_id: int) -> StoredNews | None:
+        """One article by id, with its full ticker list. No point-in-time windowing."""
+        row = self._conn.execute(
+            "SELECT a.*, a.publisher AS known_publisher, 0 AS reprint_count,"
+            " (SELECT group_concat(ticker) FROM article_tickers WHERE article_id = a.id) AS tickers"
+            " FROM articles a WHERE a.id = ?",
+            (news_id,),
+        ).fetchone()
+        return _to_stored(row) if row else None
+
     def missing_publisher_urls(self, source: str) -> dict[int, str]:
         """Id -> url for every article from `source` with no publisher yet and a url to try."""
         rows = self._conn.execute(

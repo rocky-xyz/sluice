@@ -218,3 +218,21 @@ def test_fill_publisher_sets_it_only_once(store):
     assert store.fill_publisher(article_id, "Someone else") is False
     (row,) = store.query("NVDA", before=T)
     assert row.publisher == "Benzinga"
+
+
+def test_get_returns_the_article_with_all_its_tickers(store):
+    store.add([make(1, tickers=["NVDA", "AMD"])])
+    article_id = store.query("NVDA", before=T)[0].id
+    row = store.get(article_id)
+    assert row.tickers == ["AMD", "NVDA"]
+    assert row.title == "Headline 1"
+
+
+def test_get_is_not_windowed_by_publish_time(store):
+    store.add([make(1, published_at=T + timedelta(days=1))])
+    article_id = store.query("NVDA", before=T + timedelta(days=2))[0].id
+    assert store.get(article_id) is not None
+
+
+def test_get_of_an_unknown_id_is_none(store):
+    assert store.get(999) is None

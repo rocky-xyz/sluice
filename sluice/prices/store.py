@@ -14,12 +14,13 @@ DEFAULT_PATH = Path("data/local/prices.db")
 # Far enough back for 250 trading days before the first decision day of the study (2026-01).
 HISTORY_START = date(2024, 1, 1)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Nothing to migrate: prices can be fetched again at any time, so an old table is dropped.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars (
     ticker    TEXT NOT NULL,
     day       TEXT NOT NULL,  -- New York trading day
+    open      REAL NOT NULL,  -- adjusted for splits and dividends, like close
     close     REAL NOT NULL,  -- adjusted for splits and dividends
     raw_close REAL NOT NULL,  -- adjusted for splits only
     volume    REAL NOT NULL,
@@ -34,6 +35,7 @@ class Bar(BaseModel):
     """One finished trading day."""
 
     day: date
+    open: float  # adjusted for splits and dividends, like close: use for returns
     close: float  # adjusted for splits and dividends: use for returns
     raw_close: float  # adjusted for splits only: the price to value the company at
     volume: float
@@ -90,9 +92,10 @@ class PriceStore:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM bars WHERE ticker = ?", (symbol,))
             self._conn.executemany(
-                "INSERT INTO bars (ticker, day, close, raw_close, volume) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO bars (ticker, day, open, close, raw_close, volume)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 [
-                    (symbol, bar.day.isoformat(), bar.close, bar.raw_close, bar.volume)
+                    (symbol, bar.day.isoformat(), bar.open, bar.close, bar.raw_close, bar.volume)
                     for bar in bars
                 ],
             )
@@ -115,11 +118,16 @@ class PriceStore:
                 if finished:
                     self.replace(ticker, finished)
             rows = self._conn.execute(
-                "SELECT day, close, raw_close, volume FROM bars WHERE ticker = ? AND day <= ?"
+                "SELECT day, open, close, raw_close, volume FROM bars WHERE ticker = ? AND day <= ?"
                 " ORDER BY day DESC LIMIT ?",
                 (canonical(ticker), through.isoformat(), limit),
             ).fetchall()
             return [
-                Bar(day=day, close=close, raw_close=raw, volume=volume)
-                for day, close, raw, volume in reversed(rows)
+                Bar(day=day, open=open_, close=close, raw_close=raw, volume=volume)
+                for day, open_, close, raw, volume in reversed(rows)
             ]
+
+    def get(self, ticker: str, day: date) -> Bar | None:
+        """The single bar for `day`, fetching first if the store does not reach it yet."""
+        bars = self.history(ticker, through=day, limit=1)
+        return bars[0] if bars and bars[0].day == day else None

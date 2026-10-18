@@ -19,7 +19,10 @@ def series(last: date, count: int, drift: float = 0.001, start: float = 100.0) -
     """A made-up price path: steady drift with a wobble, so that every indicator is defined."""
     bars, close = [], start
     for i, day in enumerate(trading_days(last, count)):
+        open_price = close  # the prior bar's close, so open and close differ
         close *= 1 + drift + 0.01 * math.sin(i)
         volume = 1_000_000 + 50_000 * (i % 7)
-        bars.append(Bar(day=day, close=close, raw_close=close * 1.02, volume=volume))
+        bars.append(
+            Bar(day=day, open=open_price, close=close, raw_close=close * 1.02, volume=volume)
+        )
     return bars

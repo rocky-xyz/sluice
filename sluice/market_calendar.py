@@ -52,6 +52,34 @@ def last_closed_session(moment: datetime) -> date:
         day -= timedelta(days=1)
 
 
+def next_open_after(moment: datetime) -> date:
+    """The earliest New York trading day whose regular open is strictly after `moment`.
+
+    Published before today's open: today. Published during or after today's
+    session: the next trading day, however many weekend/holiday days away.
+    """
+    moment = to_utc(moment)
+    day = moment.astimezone(ET).date()
+    while True:
+        hours = _trading_hours(day)
+        if hours is not None and moment < hours[0]:
+            return day
+        day += timedelta(days=1)
+
+
+def nth_trading_day(start: date, n: int) -> date:
+    """The n-th New York trading session on or after `start` (n=1 is `start` itself).
+
+    `start` must already be a trading day.
+    """
+    day, count = start, 1
+    while count < n:
+        day += timedelta(days=1)
+        if _trading_hours(day) is not None:
+            count += 1
+    return day
+
+
 def session_of(moment: datetime) -> Session:
     """Which part of the New York trading day a moment falls in.
 

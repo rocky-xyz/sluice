@@ -2,7 +2,13 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from sluice.market_calendar import close_of, last_closed_session, session_of
+from sluice.market_calendar import (
+    close_of,
+    last_closed_session,
+    next_open_after,
+    nth_trading_day,
+    session_of,
+)
 from sluice.news.timeutil import ET
 
 
@@ -83,3 +89,27 @@ def test_close_follows_early_closes_and_is_none_without_trading():
 )
 def test_last_closed_session(moment, expected):
     assert last_closed_session(moment) == expected
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected"),
+    [
+        (et(2026, 9, 30, 7, 0), date(2026, 9, 30)),  # pre-market, same day's open is next
+        (et(2026, 9, 30, 9, 29, 59), date(2026, 9, 30)),  # a second before the open
+        (et(2026, 9, 30, 9, 30, 0), date(2026, 10, 1)),  # at the open itself: already happened
+        (et(2026, 9, 30, 11, 0), date(2026, 10, 1)),  # mid-session: next day's open
+        (et(2026, 9, 30, 17, 0), date(2026, 10, 1)),  # after close
+        (et(2026, 10, 2, 17, 0), date(2026, 10, 5)),  # Friday after close: skip the weekend
+    ],
+)
+def test_next_open_after(moment, expected):
+    assert next_open_after(moment) == expected
+
+
+def test_nth_trading_day_counts_start_as_day_one():
+    assert nth_trading_day(date(2026, 9, 30), 1) == date(2026, 9, 30)
+    assert nth_trading_day(date(2026, 9, 30), 3) == date(2026, 10, 2)  # Wed, Thu, Fri
+
+
+def test_nth_trading_day_skips_the_weekend():
+    assert nth_trading_day(date(2026, 10, 2), 3) == date(2026, 10, 6)  # Fri, Mon, Tue

@@ -26,12 +26,17 @@ def fetch_bars(ticker: str, start: date) -> list[Bar]:
         return [
             Bar(
                 day=stamp.date(),
+                # Yahoo gives no "Adj Open"; apply the same day's split+dividend
+                # adjustment ratio (Adj Close / Close) that `close` already carries.
+                open=float(row["Open"]) * float(row["Adj Close"]) / float(row["Close"]),
                 close=float(row["Adj Close"]),
                 raw_close=float(row["Close"]),
                 volume=float(row["Volume"]),
             )
             for stamp, row in frame.iterrows()
-            if not any(math.isnan(row[column]) for column in ("Adj Close", "Close", "Volume"))
+            if not any(
+                math.isnan(row[column]) for column in ("Open", "Adj Close", "Close", "Volume")
+            )
         ]
 
     return _retry(call)

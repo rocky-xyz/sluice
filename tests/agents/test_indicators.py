@@ -22,7 +22,7 @@ LAST = date(2026, 9, 30)
 def bars(closes, volumes=None, first=date(2026, 1, 5)) -> list[Bar]:
     volumes = volumes or [1000.0] * len(closes)
     return [
-        Bar(day=first + timedelta(days=i), close=close, raw_close=close, volume=volume)
+        Bar(day=first + timedelta(days=i), open=close, close=close, raw_close=close, volume=volume)
         for i, (close, volume) in enumerate(zip(closes, volumes, strict=True))
     ]
 

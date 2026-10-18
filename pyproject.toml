@@ -14,6 +14,7 @@ dependencies = [
     "exchange_calendars>=4.5",
     "langgraph>=1.2",
     "langgraph-checkpoint-sqlite>=3.1",
+    "numpy>=1.26",
     "pydantic>=2",
     "python-dotenv>=1",
     "requests>=2.31",
