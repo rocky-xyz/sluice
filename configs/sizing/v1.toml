@@ -1,0 +1,22 @@
+# Sizing config, version 1 (docs/specs/04-sizing.md, task 6.8).
+# A change to a version that has been evaluated is a new file.
+
+k = 0.5  # tilt strength: weight ∝ max(0, 1 + k·s), s the combined cross-sectional z-score
+
+[coefficients]  # how much each standardised input counts in s
+rating = 1.0  # the pipeline's rating, buy +2 .. sell -2
+reports = 1.0  # Jev's stance on the three analyst reports (task 6.10)
+news = 1.0  # the news signal, from scored items only
+
+[stocks]
+vol_lookback = 60  # trading days of log returns behind each stock's volatility
+max_weight = 0.20  # of the invested part; the excess goes to the others pro rata
+
+[exposure]  # how much of the book is invested at all (task 6.9)
+benchmark = "SPY"
+vol_lookback = 20  # trading days of the benchmark's log returns
+target_vol = 0.12  # annualised; exposure = target / realised, capped at 1
+floor = 0.5  # never less invested than this
+trend_filter = false  # also cut exposure below the benchmark's moving average
+trend_window = 200  # trading days in that average
+trend_exposure = 0.5  # the most invested while below it
