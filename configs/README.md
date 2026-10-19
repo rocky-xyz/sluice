@@ -11,3 +11,7 @@ the evolution loop can write.
 new `sizing/vN.toml` only when its gatekeeper accepts a change, copied from the
 champion with just the changed values replaced; rolling back is pointing
 `CHAMPION` at an older version. No version file is edited or deleted.
+
+`sizing/experiments.jsonl` is the evolution loop's experiment log: one line per
+proposal, appended and never rewritten. Each proposal that looked at the
+validation period has a trial number; there are at most 20 for the whole loop.
