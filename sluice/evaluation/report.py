@@ -15,7 +15,7 @@ from pathlib import Path
 
 from sluice.agents.batch import decision_days
 from sluice.agents.prefetch import backtest_decision_time
-from sluice.evaluation import metrics
+from sluice.evaluation import metrics, quality
 from sluice.evaluation.backtest import PriceBar, Prices, simulate
 from sluice.evaluation.decisions import Decision, load_decisions
 from sluice.evaluation.portfolio import target_weights
@@ -184,4 +184,59 @@ def render(results: list[Result], cal: Calendar, requested: Segment) -> str:
                 f"| {'-' if r.neutral is None else r.neutral} |"
             )
         lines.append(f"| {MISSING_BASELINE} | 缺（推迟到 7.7，只在测试期跑） | | | | | | |")
+    return "\n".join(lines) + "\n"
+
+
+def render_quality(configs: dict[str, list[Decision]], labelled: dict[str, list]) -> str:
+    """Decision quality per config and repeat, its calibration and its consistency (task 6.7)."""
+
+    def pct(x: float | None) -> str:
+        return "-" if x is None else f"{x:.1%}"
+
+    def num(x: float | None, pattern: str = "{:+.3f}") -> str:
+        return "-" if x is None else pattern.format(x)
+
+    lines = [
+        "",
+        "## 决策质量（不经组合）",
+        "",
+        (
+            f"标签：下一个开盘起 {quality.HORIZON} 个交易日相对 SPY 的对数超额收益。"
+            "命中率只算有方向的评级（不含 hold）；Spearman 含 hold。"
+        ),
+        "",
+        "| 配置 | 重复 | 运行 | 失败 | 有标签 | 看多比例 | 看空比例 | 有方向 | 命中率 | Spearman |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for name, rows in labelled.items():
+        repeats = sorted({r.decision.repeat for r in rows})
+        for repeat in repeats:
+            m = quality.summary([r for r in rows if r.decision.repeat == repeat])
+            lines.append(
+                f"| {name} | {repeat} | {m.runs} | {m.failed} | {m.labelled} | {pct(m.bullish)} "
+                f"| {pct(m.bearish)} | {m.directional} | {pct(m.hit_rate)} | {num(m.spearman)} |"
+            )
+    lines += ["", "### 校准：研究经理自报的置信度对命中率（只含有方向的评级）", ""]
+    lines += ["| 配置 | 置信度 | 次数 | 平均置信度 | 命中率 |", "|---|---|---|---|---|"]
+    for name, rows in labelled.items():
+        for b in quality.confidence_calibration(rows):
+            lines.append(
+                f"| {name} | {b.name} | {b.n} | {num(b.mean_confidence, '{:.2f}')} "
+                f"| {pct(b.hit_rate)} |"
+            )
+    lines += ["", "### 校准：各档评级随后的平均超额收益", ""]
+    lines += ["| 配置 | 评级 | 次数 | 平均标签 |", "|---|---|---|---|"]
+    for name, rows in labelled.items():
+        for rating, n, mean in quality.rating_calibration(rows):
+            lines.append(f"| {name} | {rating} | {n} | {'-' if mean is None else f'{mean:+.2%}'} |")
+    lines += ["", "### 一致性（同一格多次重复）", ""]
+    for name, decisions in configs.items():
+        c = quality.consistency(decisions)
+        if c.cells == 0:
+            lines.append(f"- {name}：只有 1 次重复，无法计算（规格 05 要求每格 3 次）。")
+        else:
+            lines.append(
+                f"- {name}：{c.cells} 格，评级完全一致 {pct(c.agree)}，"
+                f"评级分数平均标准差 {c.mean_std:.2f}"
+            )
     return "\n".join(lines) + "\n"

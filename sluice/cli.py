@@ -332,10 +332,13 @@ def evaluate(
     ] = None,
 ) -> None:
     """Portfolio backtest of pipeline ratings on the validation period, against the baselines."""
+    from datetime import UTC, datetime
+
     from sluice.agents.batch import run_dir
     from sluice.agents.config import load_config
     from sluice.evaluation.decisions import load_decisions
-    from sluice.evaluation.report import calendar, evaluate, render
+    from sluice.evaluation.quality import label_decisions
+    from sluice.evaluation.report import calendar, evaluate, render, render_quality
     from sluice.news.store import NewsStore
     from sluice.news.weight_tables import DEFAULT_ROOT, load_all
     from sluice.prices.store import PriceStore
@@ -375,10 +378,15 @@ def evaluate(
                 for name, schedule in plan.ablations(markets, rebalances, config).items():
                     extra.append((f"{name}，{label}", schedule, None))
             results = evaluate(folders, symbols, prices, extra=extra)
+            now = datetime.now(UTC)
+            decided = {f.name: load_decisions(f, "validation") for f in folders}
+            labelled = {
+                name: label_decisions(decisions, prices, now) for name, decisions in decided.items()
+            }
         except ValueError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
-    report = render(results, cal, "validation")
+    report = render(results, cal, "validation") + render_quality(decided, labelled)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report)
     Console().print(report, markup=False)
