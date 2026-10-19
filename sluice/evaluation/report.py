@@ -176,5 +176,5 @@ def render(results: list[Result], cal: Calendar, requested: Segment) -> str:
                 f"| {pct(r.total_return)} | {num(r.turnover)} | {r.costs:.3%} "
                 f"| {'-' if r.neutral is None else r.neutral} |"
             )
-        lines.append(f"| {MISSING_BASELINE} | 缺（任务 6.5） | | | | | | |")
+        lines.append(f"| {MISSING_BASELINE} | 缺（推迟到 7.7，只在测试期跑） | | | | | | |")
     return "\n".join(lines) + "\n"
