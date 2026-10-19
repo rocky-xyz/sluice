@@ -1,0 +1,17 @@
+# Jev problem spec for analyst reports, version 1 (task 6.10, docs/specs/04-sizing.md).
+# A change to a version that has been run is a new file. The state sent with it is
+# "Stock: <ticker>\nReport by: <analyst>\n<the report>", reference ids left as written.
+
+model = "jev-1.13.0"  # pinned, as for news
+
+[questions.stance]
+type = "choice"
+instructions = """
+This is an analyst's report on one stock, written for colleagues before a decision. Taken as a \
+whole, does it argue that the stock will do well or poorly over the next two weeks? Judge what the \
+report concludes, not whether you agree with it.
+"""
+[questions.stance.criteria]
+bullish = "the report, on balance, expects the stock to do well."
+bearish = "the report, on balance, expects the stock to do poorly."
+neutral = "the report sees no clear direction, or its positive and negative points balance out."

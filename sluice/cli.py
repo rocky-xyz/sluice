@@ -352,6 +352,59 @@ def evaluate(
     Console().print(f"written to {out}")
 
 
+@app.command("score-reports")
+def score_reports_command(
+    configs: Annotated[
+        list[str] | None,
+        typer.Option("--config", help="Pipeline config whose runs to score; repeatable."),
+    ] = None,
+    spec: Annotated[
+        str, typer.Option("--spec", help="Jev problem spec for reports, under configs/scoring/.")
+    ] = "reports-v1",
+    runs: Annotated[
+        Path, typer.Option("--runs", help="Where the batch run states are.")
+    ] = Path("data/local/runs"),
+    workers: Annotated[int, typer.Option("--workers", help="Jev calls going on at a time.")] = 4,
+) -> None:
+    """Jev's stance on each analyst report of the validation runs. Resumable."""
+    import os
+
+    from rich.progress import Progress
+
+    from sluice.agents.batch import run_dir
+    from sluice.agents.cache import CallCache
+    from sluice.agents.config import load_config
+    from sluice.scoring.client import ENV_KEY, PRICE_PER_MILLION_INPUT, CachedJev, JevClient
+    from sluice.scoring.config import load_report_scoring_config
+    from sluice.scoring.reports import ReportScoreStore, load_reports, score_reports
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    config = load_report_scoring_config(spec)
+    items = [
+        item
+        for name in configs or ["v1", "v2"]
+        for item in load_reports(run_dir(runs, load_config(name)), "validation")
+    ]
+    console = Console()
+    with ReportScoreStore() as store, CallCache() as cache, Progress(console=console) as bar:
+        task = bar.add_task("reports", total=len(items))
+        result = score_reports(
+            items, store, config, CachedJev(cache, JevClient(key)), workers,
+            on_step=lambda: bar.advance(task),
+        )  # fmt: skip
+    cost = result.input_tokens / 1e6 * PRICE_PER_MILLION_INPUT
+    console.print(
+        f"{len(items)} reports: scored {result.scored}, already done {result.done}, "
+        f"too large {result.skipped}, failed {result.failed}; about ${cost:.3f}"
+    )
+    if result.failed:
+        typer.echo("Some reports failed. Rerun to continue.", err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command("score")
 def score(
     tickers: Annotated[

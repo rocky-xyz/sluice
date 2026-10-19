@@ -46,3 +46,35 @@ def load_scoring_config(version: str = "v1", root: Path = CONFIG_ROOT) -> Scorin
         digest=hashlib.sha256(raw).hexdigest()[:8],
         **tomllib.loads(raw.decode()),
     )
+
+
+class ReportScoringConfig(BaseModel):
+    """The Jev problem spec for analyst reports: one stance question (task 6.10)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    version: str  # the file's name
+    digest: str
+    model: str = Field(min_length=1)
+    questions: dict[str, QuestionSpec] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _has_a_stance_choice(self) -> "ReportScoringConfig":
+        stance = self.questions.get("stance")
+        if stance is None or stance.type != "choice":
+            raise ValueError("a report spec needs a choice question named 'stance'")
+        if not {"bullish", "bearish"} <= set(stance.criteria or {}):
+            raise ValueError("the stance question needs 'bullish' and 'bearish' options")
+        return self
+
+
+def load_report_scoring_config(
+    version: str = "reports-v1", root: Path = CONFIG_ROOT
+) -> ReportScoringConfig:
+    """Read `<root>/scoring/<version>.toml`. A misspelt or unknown key is an error."""
+    raw = (root / "scoring" / f"{version}.toml").read_bytes()
+    return ReportScoringConfig(
+        version=version,
+        digest=hashlib.sha256(raw).hexdigest()[:8],
+        **tomllib.loads(raw.decode()),
+    )
