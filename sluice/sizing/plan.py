@@ -88,7 +88,7 @@ def _weights(inputs: Inputs, m: Market, config: SizingConfig, **override) -> dic
         override.get("k", config.k),
         config.coefficients,
         config.stocks.max_weight,
-        scale_by_vol=override.get("scale_by_vol", True),
+        scale_by_vol=override.get("scale_by_vol", config.stocks.vol_scaling),
     )
 
 

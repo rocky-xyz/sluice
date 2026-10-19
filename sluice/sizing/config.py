@@ -28,6 +28,9 @@ class StocksConfig(BaseModel):
 
     vol_lookback: int = Field(gt=1)
     max_weight: float = Field(gt=0, le=1)
+    # Divide each stock's tilt by its volatility (task 7.2 made it a key, so the
+    # exposure-only control is a config too). On by default: v1 means what it meant.
+    vol_scaling: bool = True
 
 
 class ExposureConfig(BaseModel):
