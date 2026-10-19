@@ -17,14 +17,18 @@ would actually see them in.
 """
 
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal
 
 from sluice.market_calendar import next_open_after
+from sluice.news.models import StoredNews
 from sluice.news.store import NewsStore
 from sluice.news.weights import WeightEstimate, WeightTable, stance_score
-from sluice.scoring.store import ScoreStore
+from sluice.scoring.store import ItemScores, ScoreStore
+
+UNKNOWN_SOURCE = "(unknown)"  # how the weight tables name a missing publisher
 
 # What a source's or event type's learned weight says, in words an analyst can use
 # (docs/specs/07-agent-pipeline.md, "已确认（任务 5.1）"). The weight multiplies the
@@ -59,6 +63,20 @@ class SignalItem:
     relevance: float
 
 
+def signal_items(items: Iterable[StoredNews], scores: Mapping[int, ItemScores]) -> list[SignalItem]:
+    """The scored ones among `items`, ready to be weighed; unscored items are left out."""
+    return [
+        SignalItem(
+            raw=stance_score(item_scores.stance_probabilities),
+            source=item.publisher or UNKNOWN_SOURCE,
+            event_type=item_scores.event_type,
+            relevance=item_scores.relevance,
+        )
+        for item in items
+        if (item_scores := scores.get(item.id)) is not None
+    ]
+
+
 def ticker_day_signal(items: list[SignalItem], weights: WeightTable) -> float | None:
     """Relevance-weighted average of each item's ŷ_i. `None` when every relevance is 0."""
     numerator = denominator = 0.0
@@ -90,7 +108,7 @@ def group_by_ticker_day(
         entry_day = next_open_after(item.published_at)
         signal_item = SignalItem(
             raw=stance_score(score.stance_probabilities),
-            source=item.publisher or "(unknown)",
+            source=item.publisher or UNKNOWN_SOURCE,
             event_type=score.event_type,
             relevance=score.relevance,
         )

@@ -20,6 +20,7 @@ class Decision(BaseModel):
     day: date
     repeat: int
     config: str  # "<version>-<digest>"
+    run_id: str | None  # from the state's meta; None for an external file without one
     rating: Rating | None  # None when the run failed
     confidence: float | None
 
@@ -33,13 +34,15 @@ def load_decisions(folder: Path, requested: Segment, final: bool = False) -> lis
         day = date.fromisoformat(day_text)
         if segment(day) != requested:
             continue
-        verdict = json.loads(path.read_text())["decision"] or {}
+        state = json.loads(path.read_text())
+        verdict = state["decision"] or {}
         decisions.append(
             Decision(
                 ticker=path.parent.name,
                 day=day,
                 repeat=int(repeat),
                 config=folder.name,
+                run_id=(state.get("meta") or {}).get("run_id"),
                 rating=verdict.get("rating"),
                 confidence=verdict.get("confidence"),
             )

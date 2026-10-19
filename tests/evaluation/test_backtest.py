@@ -118,9 +118,9 @@ def test_ratings_become_one_schedule_per_repeat_with_holds_filled_in():
     cal = calendar("validation")
     first = cal.decisions[0]
     decisions = [
-        Decision(ticker="A", day=first, repeat=0, config="v", rating="buy", confidence=0.6),
-        Decision(ticker="B", day=first, repeat=0, config="v", rating=None, confidence=None),
-        Decision(ticker="A", day=first, repeat=1, config="v", rating="sell", confidence=0.6),
+        Decision(ticker="A", day=first, repeat=0, config="v", run_id=None, rating="buy", confidence=0.6),
+        Decision(ticker="B", day=first, repeat=0, config="v", run_id=None, rating=None, confidence=None),
+        Decision(ticker="A", day=first, repeat=1, config="v", run_id=None, rating="sell", confidence=0.6),
     ]
     schedules = rating_schedules(decisions, ["A", "B"], cal)
     schedule, neutral = schedules[0]
@@ -133,7 +133,7 @@ def test_ratings_become_one_schedule_per_repeat_with_holds_filled_in():
 def test_all_hold_ratings_follow_the_equal_weight_baseline_exactly():
     cal = calendar("validation")
     decisions = [
-        Decision(ticker=t, day=d, repeat=0, config="v", rating="hold", confidence=0.5)
+        Decision(ticker=t, day=d, repeat=0, config="v", run_id=None, rating="hold", confidence=0.5)
         for d in cal.decisions
         for t in ("A", "B")
     ]

@@ -119,13 +119,18 @@ def rating_schedules(
     return schedules
 
 
+Extra = list[tuple[str, dict[date, dict[str, float]], int | None]]  # name, schedule, filled-in
+
+
 def evaluate(
     run_dirs: list[Path],
     tickers: list[str],
     store: PriceStore,
     requested: Segment = "validation",
     final: bool = False,
+    extra: Extra | None = None,
 ) -> list[Result]:
+    """Each config's rating tilt, then `extra` schedules (from the sizing formula), then baselines."""
     cal = calendar(requested, final)
     prices = load_prices(store, [*tickers, *BENCHMARKS], cal)
     equal = {t: 1 / len(tickers) for t in tickers}
@@ -141,6 +146,8 @@ def evaluate(
             for repeat, (schedule, neutral) in rating_schedules(decisions, tickers, cal).items():
                 name = f"{folder.name} r{repeat}"
                 results.append(_result(name, cost, schedule, cal, prices, neutral))
+        for name, schedule, neutral in extra or []:
+            results.append(_result(name, cost, schedule, cal, prices, neutral))
         for name, schedule in baselines.items():
             results.append(_result(name, cost, schedule, cal, prices))
     return results

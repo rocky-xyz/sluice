@@ -8,6 +8,11 @@ rating = 1.0  # the pipeline's rating, buy +2 .. sell -2
 reports = 1.0  # Jev's stance on the three analyst reports (task 6.10)
 news = 1.0  # the news signal, from scored items only
 
+[inputs]  # where the three inputs come from; all read from stores, never asked for
+news_lookback_days = 14  # the news signal's window, as for the news analyst
+scoring_config = "v1"  # Jev news scores and the weight tables fitted on them
+report_spec = "reports-v1"  # Jev's stance on the analyst reports (task 6.10)
+
 [stocks]
 vol_lookback = 60  # trading days of log returns behind each stock's volatility
 max_weight = 0.20  # of the invested part; the excess goes to the others pro rata

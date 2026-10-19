@@ -14,11 +14,10 @@ from sluice.agents.state import (
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.market_calendar import close_of, last_closed_session
 from sluice.news.models import StoredNews
-from sluice.news.signal import SignalItem, record, ticker_day_signal
+from sluice.news.signal import UNKNOWN_SOURCE, record, signal_items, ticker_day_signal
 from sluice.news.store import NewsStore
 from sluice.news.timeutil import ET
 from sluice.news.weight_tables import StoredTable, latest_before
-from sluice.news.weights import stance_score
 from sluice.prices.store import PriceStore
 from sluice.scoring.client import CachedJev, JevError
 from sluice.scoring.config import ScoringConfig
@@ -29,7 +28,6 @@ from sluice.universe import canonical
 VALUE_DIGITS = 4  # indicators are rounded so that float noise cannot change a prompt
 SIGNAL_DIGITS = 8  # the news signal is of the order of 1e-4
 NEWS_SIGNAL = "S:news_signal"
-UNKNOWN_SOURCE = "(unknown)"  # how the weight tables name a missing publisher
 
 
 @dataclass(frozen=True)
@@ -198,17 +196,8 @@ def prefetch_weighted_news(
 
     signals = []
     if stored is not None:
-        signal_items = [
-            SignalItem(
-                raw=stance_score(item_scores.stance_probabilities),
-                source=item.publisher or UNKNOWN_SOURCE,
-                event_type=item_scores.event_type,
-                relevance=item_scores.relevance,
-            )
-            for item in found
-            if (item_scores := scores.get(item.id)) is not None
-        ]
-        value = ticker_day_signal(signal_items, stored.table)
+        weighed = signal_items(found, scores)
+        value = ticker_day_signal(weighed, stored.table)
         if value is None:
             reason = "no news signal: no scored item has any relevance"
             gaps.append(Gap(kind="news", reason=f"{reason} (weights {stored.as_of:%Y-%m-%d})"))
@@ -217,7 +206,7 @@ def prefetch_weighted_news(
                 SignalInput(
                     ref=NEWS_SIGNAL,
                     value=round(value, SIGNAL_DIGITS),
-                    n_items=len(signal_items),
+                    n_items=len(weighed),
                     weights_as_of=stored.as_of,
                 )
             )

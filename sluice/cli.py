@@ -326,26 +326,59 @@ def evaluate(
     out: Annotated[
         Path, typer.Option("--out", help="Write the report here as Markdown.")
     ] = Path("data/local/evaluation/validation.md"),
+    sizing: Annotated[
+        str | None,
+        typer.Option("--sizing", help="Also size with this config under configs/sizing/."),
+    ] = None,
 ) -> None:
     """Portfolio backtest of pipeline ratings on the validation period, against the baselines."""
     from sluice.agents.batch import run_dir
     from sluice.agents.config import load_config
+    from sluice.evaluation.decisions import load_decisions
     from sluice.evaluation.report import calendar, evaluate, render
+    from sluice.news.store import NewsStore
+    from sluice.news.weight_tables import DEFAULT_ROOT, load_all
     from sluice.prices.store import PriceStore
     from sluice.prices.yahoo import fetch_bars
+    from sluice.scoring.reports import ReportScoreStore
+    from sluice.scoring.store import ScoreStore
+    from sluice.sizing import plan
+    from sluice.sizing.config import load_sizing_config
 
     folders = [run_dir(runs, load_config(name)) for name in configs or ["v1", "v2"]]
     if absent := [str(f) for f in folders if not f.is_dir()]:
         typer.echo(f"No runs in {', '.join(absent)} (run sluice batch first).", err=True)
         raise typer.Exit(code=2)
     symbols = [t.strip() for t in tickers.split(",") if t.strip()]
-    with PriceStore(fetch=fetch_bars) as prices:
+    cal = calendar("validation")
+    with (
+        PriceStore(fetch=fetch_bars) as prices,
+        NewsStore(Path("data/news.db")) as news,
+        ScoreStore() as scores,
+        ReportScoreStore() as report_scores,
+    ):
         try:
-            results = evaluate(folders, symbols, prices)
+            extra: list = []
+            if sizing:
+                config = load_sizing_config(sizing)
+                tables = load_all(DEFAULT_ROOT, config.inputs.scoring_config)
+                src = plan.Sources(news, scores, tables, report_scores, prices)
+                markets = {d: plan.market(src, symbols, d, config) for d in cal.decisions}
+                rebalances = dict(zip(cal.decisions, cal.rebalances, strict=True))
+                label = f"sizing {config.version}-{config.digest}"
+                for folder in folders:
+                    decisions = load_decisions(folder, "validation")
+                    for repeat, (schedule, missing) in plan.formula_schedules(
+                        decisions, markets, rebalances, src, config
+                    ).items():
+                        extra.append((f"{folder.name} r{repeat} + {label}", schedule, missing))
+                for name, schedule in plan.ablations(markets, rebalances, config).items():
+                    extra.append((f"{name}，{label}", schedule, None))
+            results = evaluate(folders, symbols, prices, extra=extra)
         except ValueError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
-    report = render(results, calendar("validation"), "validation")
+    report = render(results, cal, "validation")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report)
     Console().print(report, markup=False)

@@ -114,6 +114,7 @@ sluice batch                             # backtest the universe on every tenth 
 sluice batch --config v2                 # the same with weighted news (needs TYPESAFE_API_KEY and fit-weights)
 sluice score                             # score stored news with Jev (needs TYPESAFE_API_KEY; resumable)
 sluice evaluate                          # portfolio backtest of v1 and v2 ratings on the validation period
+sluice evaluate --sizing v1              # the same, plus the sizing formula and its controls
 sluice score-reports                     # Jev's stance on each analyst report of the validation runs
 ```
 

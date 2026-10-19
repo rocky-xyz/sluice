@@ -15,6 +15,14 @@ class Coefficients(BaseModel):
     news: float = Field(ge=0)
 
 
+class InputsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    news_lookback_days: int = Field(gt=0)
+    scoring_config: str = Field(min_length=1)
+    report_spec: str = Field(min_length=1)
+
+
 class StocksConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -43,6 +51,7 @@ class SizingConfig(BaseModel):
     digest: str  # short hash of the file, so an edit in place does not pass as the same version
     k: float = Field(ge=0)
     coefficients: Coefficients
+    inputs: InputsConfig
     stocks: StocksConfig
     exposure: ExposureConfig
 
