@@ -18,6 +18,8 @@ fundamentals_app = typer.Typer(help="Financial statements.", no_args_is_help=Tru
 app.add_typer(fundamentals_app, name="fundamentals")
 calibration_app = typer.Typer(help="Hand-labeling Jev's scores against a sample.", no_args_is_help=True)
 app.add_typer(calibration_app, name="calibration")
+evolve_app = typer.Typer(help="The evolution loop over sizing configs.", no_args_is_help=True)
+app.add_typer(evolve_app, name="evolve")
 
 
 def _version(value: bool) -> None:
@@ -936,3 +938,146 @@ def news_backfill(
         typer.echo(f"Stopped: {result.aborted}. Rerun to continue.", err=True)
     if result.aborted or result.failed:
         raise typer.Exit(code=1)
+
+
+def _commit() -> str:
+    """HEAD, refusing uncommitted changes under sluice/: the log's commit must reproduce a trial."""
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
+
+    if git("status", "--porcelain", "--", "sluice").strip():
+        typer.echo(
+            "sluice/ has uncommitted changes; commit them before running the gate.", err=True
+        )
+        raise typer.Exit(code=2)
+    return git("rev-parse", "--short", "HEAD").strip()
+
+
+@contextmanager
+def _gate_backtest(runs: Path) -> Iterator:
+    from sluice.evolution.library import load_champion
+    from sluice.evolution.validation import validation_backtest
+    from sluice.news.store import NewsStore
+    from sluice.news.weight_tables import DEFAULT_ROOT, load_all
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+    from sluice.scoring.reports import ReportScoreStore
+    from sluice.scoring.store import ScoreStore
+    from sluice.sizing import plan
+
+    champion = load_champion()
+    with (
+        PriceStore(fetch=fetch_bars) as prices,
+        NewsStore(Path("data/news.db")) as news,
+        ScoreStore() as scores,
+        ReportScoreStore() as report_scores,
+    ):
+        tables = load_all(DEFAULT_ROOT, champion.inputs.scoring_config)
+        src = plan.Sources(news, scores, tables, report_scores, prices)
+        try:
+            yield validation_backtest(src, prices, list(COMPANIES), runs)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+
+
+def _show(outcome) -> None:
+    entry = outcome.entry
+    lines = [f"{outcome.status}" + (f" (trial {entry.n})" if entry.n else "")]
+    lines += [f"  problem: {p}" for p in entry.problems]
+    if e := entry.evidence:
+        pairs = ", ".join(
+            f"{c:.2f} vs {h:.2f}"
+            for c, h in zip(e.candidate_sharpes, e.champion_sharpes, strict=True)
+        )
+        lines.append(f"  Sharpe per repeat (candidate vs champion): {pairs}")
+        lines.append(
+            f"  averaged: {e.candidate_sharpe:.2f} vs {e.champion_sharpe:.2f}, "
+            f"rho {e.rho:.3f}, z {e.z:+.2f} over {e.days} days"
+        )
+    if outcome.version:
+        lines.append(f"  champion is now {outcome.version}")
+    Console().print("\n".join(lines), markup=False)
+
+
+RUNS_OPTION = typer.Option("--runs", help="Where the batch run states are.")
+
+
+@evolve_app.command("seed")
+def evolve_seed(runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs")) -> None:
+    """Log the three sizing configs 6.12 saw: v1, then k = 0 and exposure alone through the gate."""
+    from sluice.evolution.gate import seed
+
+    commit = _commit()
+    with _gate_backtest(runs) as backtest:
+        for outcome in seed(backtest, commit):
+            _show(outcome)
+    evolve_status()
+
+
+@evolve_app.command("try")
+def evolve_try(
+    changes: Annotated[
+        list[str], typer.Option("--set", help="key=value, e.g. k=0.3 or stocks.vol_scaling=false.")
+    ],
+    rationale: Annotated[str, typer.Option("--rationale", help="Why, for the log.")] = "",
+    runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs"),
+) -> None:
+    """Put one hand-written proposal through the gate. Uses a trial if it gets evaluated."""
+    import tomllib
+
+    from sluice.evolution.gate import propose
+
+    parsed = {}
+    for item in changes:
+        key, sep, value = item.partition("=")
+        try:
+            if not sep:
+                raise ValueError("no '='")
+            parsed[key.strip()] = tomllib.loads(f"v = {value.strip()}")["v"]
+        except ValueError as exc:
+            typer.echo(f"--set {item}: expected key=value ({exc})", err=True)
+            raise typer.Exit(code=2) from exc
+    commit = _commit()
+    with _gate_backtest(runs) as backtest:
+        _show(propose(parsed, "manual", backtest, commit, rationale))
+
+
+@evolve_app.command("status")
+def evolve_status() -> None:
+    """The champion, the trials left and the experiment log."""
+    from sluice.evolution.experiments import ExperimentLog
+    from sluice.evolution.library import load_champion
+
+    champion = load_champion()
+    log = ExperimentLog()
+    console = Console()
+    console.print(
+        f"champion {champion.version}-{champion.digest}; "
+        f"trials used {log.used()}, left {log.remaining()}",
+        markup=False,
+    )
+    table = Table("n", "status", "source", "against", "changes", "z", "version")
+    for e in log.entries():
+        changes = ", ".join(f"{k}={v}" for k, v in e.changes.items()) or "-"
+        z = f"{e.evidence.z:+.2f}" if e.evidence else "-"
+        table.add_row(
+            str(e.n or "-"), e.status, e.source, e.parent or "-", changes, z, e.version or "-"
+        )
+    console.print(table)
+
+
+@evolve_app.command("rollback")
+def evolve_rollback(version: str) -> None:
+    """Point CHAMPION at an existing version. Commit configs/sizing/CHAMPION afterwards."""
+    from sluice.evolution.library import champion, set_champion
+
+    before = champion()
+    try:
+        set_champion(version)
+    except FileNotFoundError as exc:
+        typer.echo(f"no configs/sizing/{version}.toml", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"champion {before} -> {version}")

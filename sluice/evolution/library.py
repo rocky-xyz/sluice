@@ -214,3 +214,16 @@ def set_champion(version: str, root: Path = CONFIG_ROOT) -> None:
     """Point `CHAMPION` at `version`, for an accepted change or a rollback. It must load."""
     load_sizing_config(version, root)
     (root / "sizing" / CHAMPION_FILE).write_text(f"{version}\n")
+
+
+def next_version(root: Path = CONFIG_ROOT) -> str:
+    """The name the next written version will get."""
+    return _next_version(root / "sizing")
+
+
+def version_with(key: str, root: Path = CONFIG_ROOT) -> str | None:
+    """The existing version whose parameters have this `params_key`, if any."""
+    for path in sorted((root / "sizing").glob("v*.toml")):
+        if params_key(load_sizing_config(path.stem, root)) == key:
+            return path.stem
+    return None

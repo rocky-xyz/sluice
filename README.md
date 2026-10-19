@@ -116,6 +116,10 @@ sluice score                             # score stored news with Jev (needs TYP
 sluice evaluate                          # portfolio backtest of v1 and v2 ratings on the validation period
 sluice evaluate --sizing v1              # the same, plus the sizing formula and its controls
 sluice score-reports                     # Jev's stance on each analyst report of the validation runs
+sluice evolve seed                       # log the sizing configs already seen; put the two controls through the gate
+sluice evolve try --set k=0.3           # one hand-written sizing change through the gate (uses a trial)
+sluice evolve status                     # champion, trials left, experiment log
+sluice evolve rollback v1                # point the champion back at an older sizing version
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
