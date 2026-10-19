@@ -17,6 +17,7 @@ from sluice.agents.state import (
     Turn,
     Verdict,
     cited_refs,
+    malformed_citations,
 )
 from sluice.news.timeutil import ET
 from sluice.universe import UNIVERSE
@@ -120,6 +121,8 @@ def _analyst(
 
     def check(answer: LLMResponse) -> Report:
         text = answer.text.strip()
+        if malformed := malformed_citations(text):
+            raise ValueError(f"the report has malformed citations: {malformed}")
         cited = cited_refs(text)
         if not cited:
             raise ValueError("the report cites no reference id")
@@ -263,6 +266,8 @@ def debater(state: PipelineState, llm: CachedLLM, config: PipelineConfig, side: 
 
     def check(answer: LLMResponse) -> Turn:
         text = answer.text.strip()
+        if malformed := malformed_citations(text):
+            raise ValueError(f"the turn has malformed citations: {malformed}")
         cited = cited_refs(text)
         if not cited:
             raise ValueError("the turn cites no reference id")

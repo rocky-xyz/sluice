@@ -17,9 +17,12 @@ GapKind = Literal["prices", "news", "fundamentals"]
 FigureUnit = Literal["amount", "ratio", "points", "multiple"]
 
 # How a source is cited in a report: [N48213], [P:rsi14], [F:revenue_q], [S:news_signal]
-# or several at once, [N1, N2].
-_REF = r"(?:N\d+|[PFS]:\w+)"
-_CITATION = re.compile(rf"\[({_REF}(?:\s*,\s*{_REF})*)\]")
+# or several at once, separated by commas or semicolons: [N1, N2], [N1; N2].
+_REF = re.compile(r"N\d+|[PFS]:\w+")
+_BRACKETS = re.compile(r"\[([^\[\]]*)\]")
+_SEPARATOR = re.compile(r"[,;]")
+# An item that is meant as a reference id even when it is not a valid one: [S], [N12x], [S:].
+_REF_LIKE = re.compile(r"N\d|[PFS]:|[NPFS]$")
 
 
 class Meta(BaseModel):
@@ -197,9 +200,33 @@ def make_run_id(
     return f"{ticker}_{stamp}_{config_version}-{config_digest}_r{repeat}"
 
 
+def _bracketed(text: str) -> list[tuple[str, list[str]]]:
+    """Every square-bracketed group in `text`, with its items."""
+    return [
+        (match.group(0), [item.strip() for item in _SEPARATOR.split(match.group(1))])
+        for match in _BRACKETS.finditer(text)
+    ]
+
+
+def _is_citation(items: list[str]) -> bool:
+    return all(_REF.fullmatch(item) for item in items)
+
+
 def cited_refs(text: str) -> set[str]:
     """Reference ids cited in square brackets in a report."""
-    return {ref.strip() for group in _CITATION.findall(text) for ref in group.split(",")}
+    return {item for _, items in _bracketed(text) if _is_citation(items) for item in items}
+
+
+def malformed_citations(text: str) -> list[str]:
+    """Bracketed groups that try to cite but are not all valid ids, such as [S] or [N1, see N2].
+
+    Other brackets, such as [sic] or a word ending like remain[s], are left alone.
+    """
+    return [
+        group
+        for group, items in _bracketed(text)
+        if not _is_citation(items) and any(_REF_LIKE.match(item) for item in items)
+    ]
 
 
 def dump_state(state: PipelineState) -> dict:

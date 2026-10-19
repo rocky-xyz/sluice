@@ -30,6 +30,7 @@ from sluice.agents.state import (
     cited_refs,
     dump_state,
     make_run_id,
+    malformed_citations,
     merge_meta,
 )
 from sluice.fundamentals.store import FundamentalsStore
@@ -245,6 +246,52 @@ def test_over_the_cap_the_most_reprinted_then_most_recent_are_kept(store):
 def test_citations_are_read_from_square_brackets():
     text = "Up [N12]. Down [N3, N40] and [P:rsi14]; not N99, not [note] and not [F: x]."
     assert cited_refs(text) == {"N12", "N3", "N40", "P:rsi14"}
+
+
+def test_ids_may_be_separated_by_semicolons():
+    text = "Margins grew [F:gross_margin_q0; F:gross_margin_yoy_q0] and [N7;N8, S:news_signal]."
+    assert cited_refs(text) == {
+        "F:gross_margin_q0", "F:gross_margin_yoy_q0", "N7", "N8", "S:news_signal",
+    }  # fmt: skip
+    assert malformed_citations(text) == []
+
+
+@pytest.mark.parametrize(
+    "group", ["[S]", "[N]", "[S:]", "[N12x]", "[F: x]", "[N1, see above]", "[N1,]", "[P:rsi_14; P]"]
+)
+def test_a_group_that_tries_to_cite_but_is_not_valid_is_malformed(group):
+    assert malformed_citations(f"Weak negative {group}. Up [N1].") == [group]
+    assert cited_refs(group) == set()
+
+
+@pytest.mark.parametrize("group", ["[sic]", "remain[s]", "[ed]", "[same refs]", "[Nvidia]", "[S&P]"])
+def test_ordinary_brackets_are_not_citations_and_not_malformed(group):
+    assert malformed_citations(f"Text {group} here [N1].") == []
+
+
+def test_a_report_with_a_malformed_citation_is_asked_again(stocked, tmp_path):
+    model = FakeModel(analyst=["Leans down [S]. Up [N1].", "Demand is strong [N1]."])
+    state = go(pipeline(stocked, tmp_path, model))
+
+    assert state["reports"]["news"].text == "Demand is strong [N1]."
+    assert len(model.asked("news_analyst")) == 2
+
+
+def test_a_turn_with_a_malformed_citation_is_asked_again(stocked, tmp_path):
+    model = FakeModel(analyst=["Demand is strong [N1]."], bull=["Up [N1; S].", "Up [N1]."])
+    state = go(pipeline(stocked, tmp_path, model, config=debating(1)))
+
+    assert state["debate"][0].text == "Up [N1]."
+    assert len(model.asked("bull")) == 2
+
+
+def test_ids_a_report_cites_with_semicolons_may_be_cited_downstream(stocked, tmp_path):
+    model = FakeModel(analyst=["Demand [N1; N2]."], bull=["It will rise [N2]."], manager=[verdict("N2")])
+    state = go(pipeline(stocked, tmp_path, model, config=debating(1)))
+
+    assert state["meta"].status == "ok"
+    assert state["decision"].evidence[0].refs == ["N2"]
+    assert len(model.asked("bull")) == 1
 
 
 def test_run_id_follows_from_the_run_parameters():
