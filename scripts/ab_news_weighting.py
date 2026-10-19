@@ -29,12 +29,13 @@ from scripts.news_label_correlation import _rank
 from sluice.agents.batch import run_dir
 from sluice.agents.config import load_config
 from sluice.agents.state import cited_refs
+from sluice.evaluation.split import TEST_1, VALIDATION, segment
 from sluice.news.labels import excess_return_label
 from sluice.prices.store import PriceStore
 from sluice.prices.yahoo import fetch_bars
 
-VALIDATION_FIRST = date(2026, 1, 2)
-TEST_FIRST = date(2026, 8, 10)  # first day of test period one; never read here
+VALIDATION_FIRST = VALIDATION[0]
+TEST_FIRST = TEST_1[0]  # from here on every segment is sealed; never read here
 HORIZON = 10  # trading days: one two-week decision period
 SCORES = {"buy": 2, "overweight": 1, "hold": 0, "underweight": -1, "sell": -2}
 SIGNAL_REF = "S:news_signal"
@@ -60,10 +61,11 @@ def load_runs(folder: Path) -> tuple[list[Run], int]:
     for path in sorted(folder.glob("*/*.json")):
         day_text, repeat = path.stem.split("_r")
         day = date.fromisoformat(day_text)
-        if day >= TEST_FIRST:
+        part = segment(day)
+        if part in ("test_1", "test_2"):
             sealed += 1
             continue
-        if day < VALIDATION_FIRST:
+        if part != "validation":
             continue
         state = json.loads(path.read_text())
         decision = state["decision"] or {}
