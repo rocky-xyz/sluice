@@ -958,7 +958,7 @@ def _commit() -> str:
 @contextmanager
 def _gate_backtest(runs: Path) -> Iterator:
     from sluice.evolution.library import load_champion
-    from sluice.evolution.validation import validation_backtest
+    from sluice.evolution.validation import Validation
     from sluice.news.store import NewsStore
     from sluice.news.weight_tables import DEFAULT_ROOT, load_all
     from sluice.prices.store import PriceStore
@@ -977,7 +977,7 @@ def _gate_backtest(runs: Path) -> Iterator:
         tables = load_all(DEFAULT_ROOT, champion.inputs.scoring_config)
         src = plan.Sources(news, scores, tables, report_scores, prices)
         try:
-            yield validation_backtest(src, prices, list(COMPANIES), runs)
+            yield Validation(src, prices, list(COMPANIES), runs)
         except ValueError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
@@ -1081,3 +1081,57 @@ def evolve_rollback(version: str) -> None:
         typer.echo(f"no configs/sizing/{version}.toml", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"champion {before} -> {version}")
+
+
+@evolve_app.command("propose")
+def evolve_propose(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the proposal only: no gate, no trial used.")
+    ] = False,
+    runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs"),
+) -> None:
+    """Ask the LLM proposer for one sizing change and put it through the gate."""
+    import os
+
+    from sluice.agents.cache import CallCache
+    from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient, LLMError
+    from sluice.evolution.experiments import ExperimentLog, TrialBudgetExhausted
+    from sluice.evolution.gate import propose
+    from sluice.evolution.library import load_champion
+    from sluice.evolution.proposer import ask, build_request
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    log = ExperimentLog()
+    try:
+        log.require_budget()  # before paying for a proposal that could not be judged
+    except TrialBudgetExhausted as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    commit = "" if dry_run else _commit()
+    champion = load_champion()
+    text = (Path("configs/sizing") / f"{champion.version}.toml").read_text()
+    with _gate_backtest(runs) as validation, CallCache() as cache:
+        request = build_request(
+            champion, text, log.remaining(), log.entries(), validation.periods(champion),
+            validation(champion), list(COMPANIES),
+        )  # fmt: skip
+        try:
+            proposal, answers = ask(CachedLLM(cache, DeepSeekClient(key)), request)
+        except LLMError as exc:
+            typer.echo(f"no proposal: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        paid = [a for a in answers if not a.cached]
+        console = Console()
+        console.print(
+            f"proposal: {proposal.changes or '(none)'}\nrationale: {proposal.rationale}\n"
+            f"answers {len(answers)}, new calls {len(paid)}, tokens in "
+            f"{sum(a.input_tokens for a in paid)}, out {sum(a.output_tokens for a in paid)}",
+            markup=False,
+        )
+        if dry_run:
+            console.print("dry run: not put through the gate, no trial used", markup=False)
+            return
+        _show(propose(proposal.changes, "llm", validation, commit, proposal.rationale))

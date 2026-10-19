@@ -90,6 +90,8 @@ def test_a_proposal_evaluated_before_returns_its_entry(root):
     again = run({"k": 0.3}, fake, root)
     assert (again.status, again.entry) == ("evaluated before", first.entry)
     assert fake.calls == [] and ExperimentLog(root).used() == 1
+    logged = ExperimentLog(root).entries()[-1]  # so the proposer's next prompt differs
+    assert logged.status == "invalid" and "trial 1, evaluated before" in logged.problems[0]
 
 
 def test_no_evaluation_once_the_budget_is_used(root):

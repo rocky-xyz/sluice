@@ -10,7 +10,7 @@ from the trial budget before any trial.
 A proposal is checked before anything is evaluated: one outside the search
 space, or with the parameters of an existing version (going back to one is a
 rollback, a person's decision), is logged as invalid and uses no trial; one
-evaluated before returns its old entry. Otherwise the log entry is written
+evaluated before is logged as invalid too and returns its old entry. Otherwise the log entry is written
 first, then the version file, then `CHAMPION`, so an interruption leaves an
 accepted entry without its file, which the next run refuses to go past,
 rather than an evaluation missing from the log.
@@ -126,6 +126,9 @@ def propose(
         return Outcome("invalid", entry)
 
     if earlier := log.find(key):
+        # Logged, so the log, and with it the proposer's next prompt, changes.
+        problem = f"the parameters of trial {earlier.n}, evaluated before: {earlier.status}"
+        log.append(Entry(n=None, params_key=key, status="invalid", problems=[problem], **common))
         return Outcome("evaluated before", earlier)
 
     log.require_budget()

@@ -118,6 +118,8 @@ sluice evaluate --sizing v1              # the same, plus the sizing formula and
 sluice score-reports                     # Jev's stance on each analyst report of the validation runs
 sluice evolve seed                       # log the sizing configs already seen; put the two controls through the gate
 sluice evolve try --set k=0.3           # one hand-written sizing change through the gate (uses a trial)
+sluice evolve propose --dry-run          # ask the LLM proposer for one sizing change, without using a trial
+sluice evolve propose                    # the same, then put it through the gate (needs DEEPSEEK_API_KEY)
 sluice evolve status                     # champion, trials left, experiment log
 sluice evolve rollback v1                # point the champion back at an older sizing version
 ```
