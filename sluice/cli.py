@@ -311,6 +311,47 @@ def batch(
         raise typer.Exit(code=1)
 
 
+@app.command("evaluate")
+def evaluate(
+    configs: Annotated[
+        list[str] | None,
+        typer.Option("--config", help="Pipeline config to evaluate; may be given more than once."),
+    ] = None,
+    tickers: Annotated[
+        str, typer.Option("--tickers", help="Comma-separated tickers in the portfolio.")
+    ] = ",".join(COMPANIES),
+    runs: Annotated[
+        Path, typer.Option("--runs", help="Where the batch run states are.")
+    ] = Path("data/local/runs"),
+    out: Annotated[
+        Path, typer.Option("--out", help="Write the report here as Markdown.")
+    ] = Path("data/local/evaluation/validation.md"),
+) -> None:
+    """Portfolio backtest of pipeline ratings on the validation period, against the baselines."""
+    from sluice.agents.batch import run_dir
+    from sluice.agents.config import load_config
+    from sluice.evaluation.report import calendar, evaluate, render
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+
+    folders = [run_dir(runs, load_config(name)) for name in configs or ["v1", "v2"]]
+    if absent := [str(f) for f in folders if not f.is_dir()]:
+        typer.echo(f"No runs in {', '.join(absent)} (run sluice batch first).", err=True)
+        raise typer.Exit(code=2)
+    symbols = [t.strip() for t in tickers.split(",") if t.strip()]
+    with PriceStore(fetch=fetch_bars) as prices:
+        try:
+            results = evaluate(folders, symbols, prices)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+    report = render(results, calendar("validation"), "validation")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report)
+    Console().print(report, markup=False)
+    Console().print(f"written to {out}")
+
+
 @app.command("score")
 def score(
     tickers: Annotated[

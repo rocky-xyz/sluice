@@ -113,6 +113,7 @@ sluice analyze TSLA                      # or as of now, for any ticker: collect
 sluice batch                             # backtest the universe on every tenth trading day (resumable)
 sluice batch --config v2                 # the same with weighted news (needs TYPESAFE_API_KEY and fit-weights)
 sluice score                             # score stored news with Jev (needs TYPESAFE_API_KEY; resumable)
+sluice evaluate                          # portfolio backtest of v1 and v2 ratings on the validation period
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
