@@ -1335,14 +1335,28 @@ def _pipeline_gate(runs: Path, workers: int, tickers: list[str]) -> Iterator:
         checkpointer.conn.close()
 
 
-def _pipeline_stage(stage: str, sets, prompts, rationale, yes, runs, workers) -> None:
+def _pipeline_stage(
+    stage: str, sets, prompts, rationale, yes, runs, workers, proposal: Path | None = None
+) -> None:
     from sluice.agents import batch as batching
     from sluice.evaluation.report import calendar
     from sluice.evolution import pipeline_gate as pg
+    from sluice.evolution import pipeline_proposer
     from sluice.evolution.pipeline_log import PipelineLog
     from sluice.evolution.pipelines import candidate, check, load_champion
 
-    changes = _pipeline_changes(sets, prompts)
+    source = "manual"
+    if proposal is not None:
+        if sets or prompts:
+            typer.echo("Give either --proposal or --set/--prompt, not both.", err=True)
+            raise typer.Exit(code=2)
+        changes, proposed_why, edited = pipeline_proposer.load(proposal)
+        rationale = rationale or proposed_why
+        source = "manual" if edited else "llm"  # an edited prompt is the user's own
+        if edited:
+            typer.echo("A prompt file was edited: this is screened as a manual proposal.")
+    else:
+        changes = _pipeline_changes(sets, prompts)
     champion = load_champion()
     tickers = list(COMPANIES)
     days = calendar("validation").decisions
@@ -1379,9 +1393,9 @@ def _pipeline_stage(stage: str, sets, prompts, rationale, yes, runs, workers) ->
     with _pipeline_gate(runs, workers, tickers) as (run, decisions, label, portfolio):
         try:
             if stage == "screen":
-                outcome = pg.screen(changes, "manual", run, decisions, label, cells, commit, rationale)
+                outcome = pg.screen(changes, source, run, decisions, label, cells, commit, rationale)
             else:
-                outcome = pg.full(changes, "manual", run, decisions, portfolio, cells, commit, rationale)
+                outcome = pg.full(changes, source, run, decisions, portfolio, cells, commit, rationale)
         except (ValueError, RuntimeError) as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
@@ -1407,6 +1421,7 @@ def _pipeline_stage(stage: str, sets, prompts, rationale, yes, runs, workers) ->
 
 
 SETS_OPTION = typer.Option("--set", help="A rule, key=value, e.g. tools.max_calls=4.")
+PROPOSAL_OPTION = typer.Option("--proposal", help="A folder written by evolve propose-pipeline.")
 PROMPTS_OPTION = typer.Option("--prompt", help="A whole prompt, role=FILE.")
 YES_OPTION = typer.Option("--yes", help="Run it and pay; without it, only the estimate.")
 
@@ -1419,9 +1434,10 @@ def evolve_screen(
     yes: Annotated[bool, YES_OPTION] = False,
     runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs"),
     workers: Annotated[int, typer.Option("--workers", help="Runs going on at a time.")] = 4,
+    proposal: Annotated[Path | None, PROPOSAL_OPTION] = None,
 ) -> None:
     """Screen a pipeline change on 55 fixed validation cells (costs money; one of 30 screens)."""
-    _pipeline_stage("screen", sets, prompts, rationale, yes, runs, workers)
+    _pipeline_stage("screen", sets, prompts, rationale, yes, runs, workers, proposal)
 
 
 @evolve_app.command("full")
@@ -1432,9 +1448,10 @@ def evolve_full(
     yes: Annotated[bool, YES_OPTION] = False,
     runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs"),
     workers: Annotated[int, typer.Option("--workers", help="Runs going on at a time.")] = 4,
+    proposal: Annotated[Path | None, PROPOSAL_OPTION] = None,
 ) -> None:
     """Fully evaluate a screened pipeline change: every validation cell, three repeats."""
-    _pipeline_stage("full", sets, prompts, rationale, yes, runs, workers)
+    _pipeline_stage("full", sets, prompts, rationale, yes, runs, workers, proposal)
 
 
 @evolve_app.command("pipeline-status")
@@ -1466,3 +1483,87 @@ def evolve_pipeline_status() -> None:
             e.stage, str(e.n or "-"), e.status, e.layer or "-", changes, result, e.version or "-"
         )
     console.print(table)
+
+
+@evolve_app.command("propose-pipeline")
+def evolve_propose_pipeline(
+    runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs"),
+) -> None:
+    """Ask the LLM for one pipeline change (rules or one prompt); write it for a screen."""
+    import json
+    import os
+    from datetime import UTC, datetime
+
+    from sluice.agents import batch as batching
+    from sluice.agents.cache import CallCache
+    from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient, LLMError
+    from sluice.agents.prefetch import backtest_decision_time
+    from sluice.evaluation.quality import HORIZON
+    from sluice.evaluation.report import calendar
+    from sluice.evolution import pipeline_gate as pg
+    from sluice.evolution import pipeline_proposer as pp
+    from sluice.evolution.pipeline_log import PipelineLog
+    from sluice.evolution.pipelines import load_champion
+    from sluice.news.labels import excess_return_label
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    log = PipelineLog()
+    if log.remaining("screen") <= 0:
+        typer.echo("Every screen is used; nothing to propose for.", err=True)
+        raise typer.Exit(code=2)
+    champion = load_champion()
+    folder = batching.run_dir(runs, champion)
+    now = datetime.now(UTC)
+    calls = []
+    with PriceStore(fetch=fetch_bars) as prices:
+        for day in pp.unseen_days(calendar("validation").decisions):
+            for ticker in COMPANIES:
+                path = folder / ticker / f"{day}_r0.json"
+                if path.exists():
+                    when = backtest_decision_time(day)
+                    labelled = excess_return_label(ticker, when, HORIZON, prices, now)
+                    calls.append(pp.Call(ticker, day, json.loads(path.read_text()), labelled))
+    if not calls:
+        typer.echo(f"No runs of {folder.name} on the unseen days yet.", err=True)
+        raise typer.Exit(code=2)
+    remaining = {stage: log.remaining(stage) for stage in ("screen", "full")}
+    request = pp.build_request(champion, remaining, log.entries(), calls)
+    with CallCache() as cache:
+        try:
+            proposal, answers = pp.ask(CachedLLM(cache, DeepSeekClient(key)), request)
+        except LLMError as exc:
+            typer.echo(f"no proposal: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+    paid = [a for a in answers if not a.cached]
+    console = Console()
+    shown = {
+        k: (f"<{len(v)} characters>" if k.startswith("prompts.") else v)
+        for k, v in proposal.changes.items()
+    }
+    console.print(
+        f"material: {len(calls)} runs of {folder.name} on days the screen does not use\n"
+        f"proposal: {shown or '(none)'}\nrationale: {proposal.rationale}\n"
+        f"new calls {len(paid)}, tokens in {sum(a.input_tokens for a in paid)}, "
+        f"out {sum(a.output_tokens for a in paid)}",
+        markup=False,
+    )
+    if not proposal.changes:
+        commit = _commit()
+
+        def unused(*_):
+            raise AssertionError("nothing runs for an empty proposal")
+
+        pg.screen({}, "llm", unused, unused, unused, [], commit, proposal.rationale)
+        console.print("logged as invalid (no change proposed); no screen used", markup=False)
+        return
+    saved = pp.save(proposal, champion)
+    console.print(
+        f"written to {saved}\nestimate: sluice evolve screen --proposal {saved}\n"
+        f"run it:   sluice evolve screen --proposal {saved} --yes",
+        markup=False,
+    )

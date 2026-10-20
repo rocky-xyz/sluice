@@ -127,6 +127,7 @@ sluice evolve screen --set tools.max_calls=4         # estimate a pipeline chang
 sluice evolve screen --prompt news_analyst=new.txt   # the same for one role's whole prompt
 sluice evolve full --set tools.max_calls=4 --yes     # full validation run of a screened change
 sluice evolve pipeline-status                        # pipeline champion, screens and full evaluations left
+sluice evolve propose-pipeline                       # ask the LLM for one pipeline change; screen it with --proposal
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
