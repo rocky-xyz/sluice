@@ -1,0 +1,35 @@
+# Pattern rules, version 1 (docs/specs/09-patterns.md, tasks 10.1-10.4), from the notes in
+# docs/local-notes/悟道.md as the user confirmed them. A change to a version that has been
+# studied is a new file.
+
+[cuorou]  # 搓揉线: a long upper shadow, then a long lower shadow, on shrinking volume
+shadow_to_body = 2.0  # each shadow at least this many bodies
+shadow_to_range = 0.5  # and at least this share of the bar's range
+max_volume_vs_prev = 0.7  # day 2's volume over day 1's
+max_volume_vs_avg5 = 1.0  # both days' volume over the 5 days before them
+above_sma = 60  # close above this moving average: the stock has risen a stretch
+max_abs_ret20 = 0.08  # and moved at most this much over 20 days: a platform
+
+[harami]  # 孕线: a small bar inside a big bearish one or a long lower shadow
+mother_body_to_avg = 1.5  # a big bearish mother: body over the 20 bodies before it
+mother_lower_to_range = 0.5  # or a long lower shadow
+baby_to_mother_range = 0.5  # the baby's range over the mother's, at most
+daily_below_sma = 20  # daily: close below this average (a decline)
+weekly_bearish_weeks = 3  # weekly: at least this many bearish weeks right before the baby
+
+[wedge]  # 楔形突破
+min_pivots = 3  # descending pivot highs, and lows, at least
+max_pivots = 5  # and at most, counted back from the latest
+min_days = 20  # trading days from the first pivot to the breakout
+max_days = 120
+middle_tolerance = 0.01  # a middle pivot high may stand this far above the upper line
+max_gaps = 2  # open-to-previous-close gaps larger than `gap` inside the wedge, at most
+gap = 0.02
+breakout = 0.01  # close above the upper line by this much
+breakout_volume = 1.5  # volume over the 20-day average, at least
+market_sma = 50  # SPY's close above its average of this many days
+hold_days = 3  # closes at or above the breakout level for this many bars: confirmed
+retest_days = 10  # a retest may confirm it within this many bars
+retest_band = 0.02  # the retest's low within this much of the breakout level
+doji_body = 0.1  # the retest bar: body at most this share of its range
+doji_volume = 0.8  # and volume over the 5 days before at most this
