@@ -22,6 +22,7 @@ import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -41,6 +42,9 @@ from sluice.market_calendar import last_closed_session
 from sluice.news.models import StoredNews
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
+
+if TYPE_CHECKING:
+    from sluice.patterns.tool import PatternSource
 
 VOLUME_WINDOW = 20  # days behind each day's volume ratio, as for the indicator
 # Each analyst's tools (docs/specs/08, task 9.4): the split of v1's prefetched inputs.
@@ -64,6 +68,8 @@ class ToolContext:
     prices: PriceStore
     statements: FundamentalsStore
     config: PipelineConfig
+    # Highs and lows, rules and history tables for get_patterns (task 10.7); None: not offered.
+    patterns: "PatternSource | None" = None
 
     @property
     def rules(self) -> ToolsConfig:
@@ -95,6 +101,12 @@ class _Search(BaseModel):
     query: str = ""
     days: int | None = Field(default=None, ge=1)
     limit: int = Field(default=10, ge=1)
+
+
+class _Patterns(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    days: int = Field(default=20, ge=1)
+    patterns: list[Literal["cuorou", "harami_daily", "harami_weekly", "wedge"]] = []
 
 
 class _Fundamentals(BaseModel):
@@ -195,6 +207,18 @@ def _fundamentals(ctx: ToolContext, args: _Fundamentals, notes: list[str]):
     return {"quarters": quarters}, [*head, *(_figure_line(i) for i in shown), *_gaps(gaps)], shown
 
 
+def _patterns(ctx: ToolContext, args: _Patterns, notes: list[str]):
+    from sluice.patterns import tool as pattern_tool
+
+    if ctx.patterns is None:
+        return {}, ["Missing: pattern detection is not available in this run."], []
+    days = _cut(args.days, pattern_tool.MAX_DAYS, "days", notes)
+    lines, items = pattern_tool.recent(
+        ctx.patterns, ctx.ticker, ctx.decision_time, days, list(args.patterns)
+    )
+    return {"days": days, "patterns": list(args.patterns)}, lines, items
+
+
 def _schema(properties: dict) -> dict:
     return {"type": "object", "properties": properties, "additionalProperties": False}
 
@@ -253,6 +277,31 @@ def _tools(rules: ToolsConfig, news_days: int, quarters: int) -> dict[str, _Tool
             ),
             _Fundamentals,
             _fundamentals,
+        ),
+        # registered for task 10.7, but in no analyst's ROLE_TOOLS until task 10.8 says so
+        "get_patterns": _Tool(
+            ToolSpec(
+                name="get_patterns",
+                description="Candlestick pattern events of the stock in the last `days` trading "
+                "days before the decision time (at most 60): cuorou, daily and weekly harami, "
+                "falling wedge breakouts. Each comes with how that pattern fared on S&P 500 "
+                "stocks since 2016 against the average stock-day, from a table fitted before "
+                "the decision time. `patterns` narrows the list; empty means all.",
+                parameters=_schema(
+                    {
+                        "days": integer,
+                        "patterns": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["cuorou", "harami_daily", "harami_weekly", "wedge"],
+                            },
+                        },
+                    }
+                ),
+            ),
+            _Patterns,
+            _patterns,
         ),
     }
 

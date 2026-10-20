@@ -98,6 +98,17 @@ class PriceDay(BaseModel):
     volume_ratio: float | None  # volume over the average of the 20 days before; None if short
 
 
+class PatternItem(BaseModel):
+    """One pattern event get_patterns returned (docs/specs/09-patterns.md, task 10.7)."""
+
+    ref: str  # "P:pat_<pattern>_<stage>_<YYYYMMDD>"
+    pattern: str
+    stage: str
+    day: date
+    how: str = ""
+    levels: dict[str, float] = {}
+
+
 class ToolUse(BaseModel):
     """One tool call an analyst made (docs/specs/08-agent-harness.md, task 9.4)."""
 
@@ -109,7 +120,7 @@ class ToolUse(BaseModel):
     refs: list[str]  # what it may now cite
     notes: list[str] = []
     error: str | None = None
-    items: list[PriceInput | PriceDay | NewsInput | FundamentalInput] = []
+    items: list[PriceInput | PriceDay | NewsInput | FundamentalInput | PatternItem] = []
 
 
 class Gap(BaseModel):
@@ -250,6 +261,7 @@ STATE_MODELS = (
     Decision,
     Call,
     PriceDay,
+    PatternItem,
     ToolUse,
     Verdict,
     Question,
