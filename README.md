@@ -7,10 +7,10 @@ position sizes with code rather than with an LLM.
 This is a research and decision-support tool. It does not place orders, and
 nothing here is financial advice.
 
-> **Status: research prototype.** Every roadmap step below is built and tested;
-> the one evaluation on the sealed test period is still to run. Results on the
-> validation period so far show no stock-picking skill in the LLM ratings; see
-> the roadmap notes.
+> **Status: research prototype, evaluated.** Every roadmap step below is built
+> and tested, and the one evaluation on the sealed test period has been run. The
+> LLM ratings showed no stock-picking skill there either; plain volatility
+> scaling was the only part that helped. See the results below.
 
 ## Why
 
@@ -240,7 +240,34 @@ pytest -q          # tests marked `integration` are skipped by default
   the validation period had been looked at many times)
 - [x] Candlestick pattern study (cuorou, harami, falling wedge) on the S&P 500:
   no pattern beat the baseline reliably; the tool is not wired in
-- [ ] The one evaluation on the sealed test period
+- [x] The one evaluation on the sealed test period (see Results)
+
+## Results
+
+The one evaluation on the sealed test period (decisions on 2026-08-10 to
+2026-10-06, 50 trading days, 11 stocks, 3 repeats, 0.1% costs). The configuration
+was fixed before it was opened: pipeline v1 (unweighted news) with sizing v1.
+
+| Strategy | Sharpe (annualised) |
+|---|---|
+| Pipeline v1 + sizing formula, three repeats | −0.47 / −0.63 / −0.20 |
+| Volatility scaling + exposure, ignoring the ratings | **+0.25** |
+| Equal weight, rebalanced | +0.07 |
+| Equal weight, bought once | −0.03 |
+| SPY buy-and-hold | −0.25 |
+| QQQ buy-and-hold | −0.18 |
+
+- The ratings ranked stocks the wrong way round (Spearman −0.05 to −0.16 against
+  the next ten days' excess return; stocks rated overweight then trailed SPY by
+  3.4% on average). On the validation period they showed no skill either.
+- Scaling each stock by its volatility, without any rating, was the best
+  strategy on both periods.
+- Fifty trading days is short: the standard error of an annualised Sharpe ratio
+  is about 2.2, so every difference above is within noise.
+
+The conclusion so far: in this setup, the LLM pipeline adds noise, not skill;
+the parts written as plain code (point-in-time data, sizing, evaluation) are what
+held up.
 
 ## Acknowledgements
 
