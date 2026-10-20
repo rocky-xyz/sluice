@@ -7,9 +7,10 @@ position sizes with code rather than with an LLM.
 This is a research and decision-support tool. It does not place orders, and
 nothing here is financial advice.
 
-> **Status: early.** The repository currently contains the news store and
-> collectors for Yahoo Finance and Finnhub. The sections below describe the design being built;
-> the roadmap shows what exists.
+> **Status: research prototype.** Every roadmap step below is built and tested;
+> the one evaluation on the sealed test period is still to run. Results on the
+> validation period so far show no stock-picking skill in the LLM ratings; see
+> the roadmap notes.
 
 ## Why
 
@@ -44,8 +45,11 @@ scoring                per-item scores: relevance, stance, novelty, rumour,
 aggregation            learned weights by source x type x regime
                        -> weighted news signal
         |
-agents                 multi-agent graph; the news analyst receives filtered,
-                       weighted items and the aggregate signal              [cached]
+agents                 multi-agent graph: market, news and fundamentals
+                       analysts, a bull/bear debate, a research manager.
+                       v1/v2: data prefetched by code; v3: analysts fetch it
+                       themselves through point-in-time tools, and the manager
+                       may send them one round of follow-up questions       [cached]
         |
 sizing                 regime (computed in code) + scored analyst stances
 (pure Python)          -> target position -> volatility scaling -> caps
@@ -55,7 +59,13 @@ evaluation (frozen)    portfolio walk-forward backtest, baselines, hit rate,
         ^
 evolution              proposer (LLM) reads failures -> config diff -> gate
                        accepts only if validation gain > noise -> versioned
-                       config store
+                       config store. Two layers: sizing parameters (one gate),
+                       pipeline rules and prompts (a cheap screen, then a full
+                       evaluation)
+
+patterns (side study)  candlestick rules on ten years of S&P 500 bars -> event
+                       study against a baseline -> a get_patterns tool, built
+                       but not offered to the analysts
 ```
 
 ## Design rules
@@ -75,8 +85,11 @@ evolution              proposer (LLM) reads failures -> config diff -> gate
 ```
 sluice/
   news/         collection, storage, deduplication, features, event study, weights
+  prices/       daily bars from Yahoo, stored point-in-time
+  fundamentals/ quarterly statements from Alpha Vantage, archived as fetched
   scoring/      versioned question specs, scorer client, score cache
-  agents/       multi-agent pipeline: graph, state, roles, prompts, LLM client
+  agents/       multi-agent pipeline: graph, state, roles, tools, tool loop, LLM client
+  patterns/     candlestick rules, pivots, weekly bars, event study, get_patterns
   sizing/       regime detection, weighting, position sizing, risk caps
   evaluation/   portfolio backtest, metrics, data splits, calibration (frozen)
   evolution/    proposer, gate, config store, experiment log
@@ -213,21 +226,30 @@ pytest -q          # tests marked `integration` are skipped by default
 ## Roadmap
 
 - [x] Packaging and package skeleton
-- [ ] News store and daily collection
-- [ ] Multi-agent pipeline skeleton
-- [ ] Per-item news scoring
-- [ ] News event study and learned weights
-- [ ] Weighted news wired into the pipeline
-- [ ] Position sizing and portfolio backtest
-- [ ] Evolution loop
+- [x] News store and daily collection (Yahoo Finance, Finnhub backfill)
+- [x] Multi-agent pipeline skeleton
+- [x] Per-item news scoring with Jev
+- [x] News event study and learned source/event-type weights
+- [x] Weighted news wired into the pipeline (v2): no better than unweighted (v1)
+  on the validation period
+- [x] Position sizing and portfolio backtest: volatility scaling is the one
+  part that helped; the rating tilt adds noise, not skill
+- [x] Evolution loop over sizing parameters: no change passed the gate
+- [x] Agent harness (v3): analysts with tools and a follow-up round, with a
+  two-stage gate for prompts and rules: v3 was not better than v1 (exploratory:
+  the validation period had been looked at many times)
+- [x] Candlestick pattern study (cuorou, harami, falling wedge) on the S&P 500:
+  no pattern beat the baseline reliably; the tool is not wired in
+- [ ] The one evaluation on the sealed test period
 
 ## Acknowledgements
 
-The overall architecture (parallel analysts, a bull/bear debate, a risk debate
-and a final decision) is inspired by
+The overall architecture (parallel analysts, a bull/bear debate and a final
+decision) is inspired by
 [TradingAgents](https://github.com/TauricResearch/TradingAgents). No code or
-prompts are copied from it; it is used only as an architectural reference and
-as an external baseline run outside this repository.
+prompts are copied from it; it is used only as an architectural reference. It
+was set up as an external baseline outside this repository, but to save cost it
+is not run on the test period, and the final evaluation reports it as missing.
 
 ## License
 

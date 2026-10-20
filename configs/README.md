@@ -15,3 +15,11 @@ champion with just the changed values replaced; rolling back is pointing
 `sizing/experiments.jsonl` is the evolution loop's experiment log: one line per
 proposal, appended and never rewritten. Each proposal that looked at the
 validation period has a trial number; there are at most 20 for the whole loop.
+
+`pipeline/CHAMPION` and `pipeline/experiments.jsonl` do the same for the pipeline
+(prompts and tool-loop rules), with two budgets: up to 30 screens on 55 fixed
+validation runs, and up to 5 full evaluations, each only after a passed screen.
+
+`patterns/vN.toml` holds the candlestick rules of the pattern study, and
+`universe/` the fixed stock lists it runs on (today's S&P 500, read once, with
+the date it was read: looked back on, it carries survivorship bias).
