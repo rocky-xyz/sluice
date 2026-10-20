@@ -130,6 +130,7 @@ sluice evolve pipeline-status                        # pipeline champion, screen
 sluice evolve propose-pipeline                       # ask the LLM for one pipeline change; screen it with --proposal
 sluice patterns universe                 # read today's S&P 500 once into configs/universe/ (pattern study)
 sluice patterns fetch                    # ten years of daily bars for it, in a store of its own (resumable)
+sluice patterns review                   # a page of examples of each pattern, to judge the definitions by eye
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor

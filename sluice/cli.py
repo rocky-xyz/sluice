@@ -1638,3 +1638,54 @@ def patterns_fetch(
     if result.failed:
         typer.echo("Some failed; run again to retry them.", err=True)
         raise typer.Exit(code=1)
+
+
+@patterns_app.command("review")
+def patterns_review(
+    version: Annotated[str, typer.Option("--config", help="Pattern rules under configs/patterns/.")] = "v1",
+    name: Annotated[str, UNIVERSE_OPTION] = "sp500-2026-10",
+    seed: Annotated[int, typer.Option("--seed", help="For the random examples.")] = 1,
+    db: Annotated[Path, typer.Option("--db", help="The pattern study's price store.")] = Path(
+        "data/local/patterns/prices.db"
+    ),
+    out: Annotated[Path | None, typer.Option("--out", help="The page to write.")] = None,
+) -> None:
+    """A page of examples of each pattern, for judging the definitions by eye. No returns shown."""
+    from collections import Counter
+    from datetime import UTC, datetime
+
+    from sluice.market_calendar import last_closed_session
+    from sluice.patterns import review, universe
+    from sluice.patterns.candles import candles, weekly
+    from sluice.patterns.config import load_pattern_config
+    from sluice.patterns.detect import detect
+    from sluice.prices.store import PriceStore
+
+    config = load_pattern_config(version)
+    through = last_closed_session(datetime.now(UTC))
+    found: list[review.Example] = []
+    confirmations: dict = {}
+    counts: Counter = Counter()
+    with PriceStore(db) as store:
+        market = {c.day: c for c in candles(store.history("SPY", through, 4000))}
+        for symbol in universe.load(name):
+            bars = store.history(symbol, through, 4000)
+            daily, weeks = candles(bars), candles(weekly(bars))
+            for event in detect(daily, weeks, market, config):
+                counts[(event.pattern, event.stage)] += 1
+                if event.stage == "confirmed":
+                    confirmations[(symbol, event.marks[0])] = event.marks[1]
+                    continue
+                series = weeks if event.pattern == "harami_weekly" else daily
+                found.append(
+                    review.Example(symbol, event, series, review.margin(event, series, config), "")
+                )
+    notes = [
+        f"{review.NAMES[p]}{'（' + s + '）' if s != 'signal' else ''}：10 年 × {len(universe.load(name))} 只里共 {n} 次"
+        for (p, s), n in sorted(counts.items())
+    ]
+    chosen = review.choose(found, seed)
+    path = out or Path(f"data/local/patterns/review-{config.version}.html")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(review.page(chosen, config, confirmations, notes))
+    typer.echo(f"{len(chosen)} examples written to {path}")

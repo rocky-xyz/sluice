@@ -30,6 +30,8 @@ class PatternEvent:
     day: date  # when it became known: trading starts at the next open
     levels: dict[str, float] = field(default_factory=dict)  # prices and ratios worth showing
     how: str = ""  # a confirmed wedge: "hold" or "retest"
+    marks: tuple[date, ...] = ()  # the bars the rule looked at, for a chart (task 10.5)
+    lines: tuple[tuple[date, float, date, float], ...] = ()  # a wedge's upper and lower lines
 
 
 def _sma(c: Candle, n: int) -> float | None:
@@ -68,7 +70,8 @@ def cuorou(series: list[Candle], rules: CuorouRules) -> list[PatternEvent]:
                 "day2_low": second.low,
                 "volume_vs_day1": second.vol_prev,
             }
-            out.append(PatternEvent("cuorou", "signal", second.day, levels))
+            marks = (first.day, second.day)
+            out.append(PatternEvent("cuorou", "signal", second.day, levels, marks=marks))
     return out
 
 
@@ -98,7 +101,8 @@ def harami(series: list[Candle], rules: HaramiRules, weekly: bool = False) -> li
             declining = average is not None and baby.close < average
         if inside and small and declining:
             levels = {"mother_high": mother.high, "mother_low": mother.low}
-            out.append(PatternEvent(name, "signal", baby.day, levels))
+            marks = (mother.day, baby.day)
+            out.append(PatternEvent(name, "signal", baby.day, levels, marks=marks))
     return out
 
 
@@ -128,8 +132,8 @@ def _descending(known: list[Pivot], rules: WedgeRules) -> list[Pivot] | None:
 
 def _wedge_at(
     series: list[Candle], t: int, highs: list[Pivot], lows: list[Pivot], rules: WedgeRules
-) -> tuple[_Line, int] | None:
-    """The wedge drawn from pivots known before day t, if there is one: (upper line, start)."""
+) -> tuple[_Line, int, _Line] | None:
+    """The wedge drawn from pivots known before day t, if any: (upper line, start, lower line)."""
     tops, bottoms = _descending(highs, rules), _descending(lows, rules)
     if tops is None or bottoms is None:
         return None
@@ -157,7 +161,7 @@ def _wedge_at(
     gaps = sum(abs(b.open / a.close - 1) > rules.gap for a, b in pairwise(span))
     if gaps > rules.max_gaps:
         return None
-    return upper, start
+    return upper, start, lower
 
 
 def wedge(
@@ -181,7 +185,7 @@ def wedge(
         drawn = _wedge_at(series, t, known_highs, known_lows, rules)
         if drawn is None:
             continue
-        upper, start = drawn
+        upper, start, lower = drawn
         level = upper.at(t)
         crossed = today.close > level * (1 + rules.breakout)
         first_time = yesterday.close <= upper.at(t - 1) * (1 + rules.breakout)
@@ -198,11 +202,20 @@ def wedge(
             "volume_vs_avg20": today.vol_avg20,
             "days": float(t - start),
         }
-        out.append(PatternEvent("wedge", "candidate", today.day, levels))
+        lines = tuple(
+            (line.first.day, line.first.price, line.last.day, line.last.price)
+            for line in (upper, lower)
+        )
+        out.append(
+            PatternEvent("wedge", "candidate", today.day, levels, marks=(today.day,), lines=lines)
+        )
         confirmed = _confirm(series, t, level, rules)
         if confirmed is not None:
             j, how = confirmed
-            out.append(PatternEvent("wedge", "confirmed", series[j].day, levels, how))
+            marks = (today.day, series[j].day)
+            out.append(
+                PatternEvent("wedge", "confirmed", series[j].day, levels, how, marks, lines)
+            )
     return out
 
 
