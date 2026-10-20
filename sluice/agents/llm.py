@@ -28,11 +28,37 @@ class LLMError(RuntimeError):
         self.answers: list[LLMResponse] = []
 
 
+class ToolCall(BaseModel):
+    """One function call the model asked for; `arguments` is its JSON text, as sent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    arguments: str
+
+
+class ToolSpec(BaseModel):
+    """A function the model may call: its name, what it does, its parameters' JSON Schema."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    description: str
+    parameters: dict
+
+
 class Message(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    role: Literal["system", "user", "assistant"]
+    role: Literal["system", "user", "assistant", "tool"]
     content: str
+    # The model's function calls, on an assistant message (task 9.2).
+    tool_calls: tuple[ToolCall, ...] = ()
+    # Which call a tool message answers.
+    tool_call_id: str | None = None
+    # The thinking that came with an assistant message, sent back when the API asks for it.
+    reasoning_content: str | None = None
 
 
 class LLMRequest(BaseModel):
@@ -45,6 +71,9 @@ class LLMRequest(BaseModel):
     temperature: float = 0.0
     # DeepSeek only honours JSON mode when the prompt itself mentions "json".
     json_mode: bool = False
+    tools: tuple[ToolSpec, ...] = ()
+    # "none" makes the model answer in text although tools are listed: the last turn of a loop.
+    tool_choice: Literal["auto", "none"] | None = None
 
 
 class LLMResponse(BaseModel):
@@ -53,6 +82,8 @@ class LLMResponse(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cached: bool = False  # True when no call was made for this answer
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str | None = None  # "stop", "tool_calls", "length", ...
 
 
 class Completer(Protocol):
@@ -66,9 +97,42 @@ def cache_key(request: LLMRequest, repeat: int = 0, attempt: int = 0) -> str:
     separates retries after an answer was rejected. Without them every re-run
     and every retry would get the first answer back.
     """
-    payload = {"request": request.model_dump(mode="json"), "repeat": repeat, "attempt": attempt}
+    payload = {"request": _keyed(request), "repeat": repeat, "attempt": attempt}
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+# Fields added for function calling (task 9.2), left out of the key while empty, so that every
+# request made before them keeps the key it was cached under.
+_REQUEST_EXTRAS = {"tools": (), "tool_choice": None}
+_MESSAGE_EXTRAS = {"tool_calls": (), "tool_call_id": None, "reasoning_content": None}
+
+
+def _keyed(request: LLMRequest) -> dict:
+    dumped = request.model_dump(mode="json")
+    for field, empty in _REQUEST_EXTRAS.items():
+        if getattr(request, field) == empty:
+            del dumped[field]
+    for message, out in zip(request.messages, dumped["messages"], strict=True):
+        for field, empty in _MESSAGE_EXTRAS.items():
+            if getattr(message, field) == empty:
+                del out[field]
+    return dumped
+
+
+def _wire(message: Message) -> dict:
+    """A message as the OpenAI-style chat API takes it."""
+    out: dict[str, object] = {"role": message.role, "content": message.content}
+    if message.tool_calls:
+        out["tool_calls"] = [
+            {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}
+            for c in message.tool_calls
+        ]
+    if message.tool_call_id is not None:
+        out["tool_call_id"] = message.tool_call_id
+    if message.reasoning_content is not None:
+        out["reasoning_content"] = message.reasoning_content
+    return out
 
 
 class DeepSeekClient:
@@ -87,12 +151,18 @@ class DeepSeekClient:
     def complete(self, request: LLMRequest) -> LLMResponse:
         body: dict[str, object] = {
             "model": request.model,
-            "messages": [m.model_dump() for m in request.messages],
+            "messages": [_wire(m) for m in request.messages],
             "temperature": request.temperature,
             "stream": False,
         }
         if request.json_mode:
             body["response_format"] = {"type": "json_object"}
+        if request.tools:
+            body["tools"] = [
+                {"type": "function", "function": spec.model_dump()} for spec in request.tools
+            ]
+        if request.tool_choice is not None:
+            body["tool_choice"] = request.tool_choice
         try:
             response = self._post(
                 self._url,
@@ -110,13 +180,22 @@ class DeepSeekClient:
             )
         try:
             data = response.json()
-            message = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            message = choice["message"]
             usage = data.get("usage") or {}
+            calls = tuple(
+                ToolCall(
+                    id=c["id"], name=c["function"]["name"], arguments=c["function"]["arguments"]
+                )
+                for c in message.get("tool_calls") or []
+            )
             return LLMResponse(
                 text=message.get("content") or "",
                 reasoning=message.get("reasoning_content") or None,
                 input_tokens=usage.get("prompt_tokens", 0),
                 output_tokens=usage.get("completion_tokens", 0),
+                tool_calls=calls,
+                finish_reason=choice.get("finish_reason"),
             )
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
             raise LLMError(f"unexpected answer: {response.text[:200]}", retryable=True) from exc

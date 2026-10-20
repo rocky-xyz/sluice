@@ -14,6 +14,8 @@ from sluice.agents.llm import (
     LLMRequest,
     LLMResponse,
     Message,
+    ToolCall,
+    ToolSpec,
     cache_key,
 )
 
@@ -273,3 +275,112 @@ def test_giving_up_hands_back_the_answers_already_received(cache):
     with pytest.raises(LLMError) as raised:
         model.complete_checked(request(), parse)
     assert [a.text for a in raised.value.answers] == ["not json", "still not json", "nor this"]
+
+
+# --- function calling (task 9.2) ---
+
+TOOL = ToolSpec(
+    name="get_indicators",
+    description="Price indicators as of the decision time.",
+    parameters={"type": "object", "properties": {}, "additionalProperties": False},
+)
+CALL = ToolCall(id="call_1", name="get_indicators", arguments="{}")
+
+
+def tool_loop_request(**overrides) -> LLMRequest:
+    messages = (
+        Message(role="system", content="Use the tool."),
+        Message(role="user", content="How is NVDA doing?"),
+        Message(role="assistant", content="", tool_calls=(CALL,)),
+        Message(role="tool", content='{"P:rsi_14": 61}', tool_call_id="call_1"),
+    )
+    fields = {"model": "deepseek-flash", "messages": messages, "tools": (TOOL,)}
+    return LLMRequest(**(fields | overrides))
+
+
+def test_requests_made_before_function_calling_keep_their_cache_keys():
+    # Computed with the code before task 9.2; 117k answers are cached under such keys.
+    old = LLMRequest(
+        model="deepseek-flash",
+        messages=(
+            Message(role="system", content="Be brief."),
+            Message(role="user", content="Say hi."),
+        ),
+        temperature=0.0,
+        json_mode=True,
+    )
+    assert cache_key(old) == "a4d98fe6993f02a3d37c65df4407730b3eac46ac15cd72134769fa5867ad775d"
+    assert cache_key(old, 2, 1) == (
+        "59f4d3fe79aa2a9abd5521c043099763f551bcb7371de2de3a9fd693f0600f24"
+    )
+
+
+def test_tools_tool_choice_and_each_turn_of_the_loop_change_the_key():
+    base = cache_key(tool_loop_request())
+    without_result = tool_loop_request().model_copy(
+        update={"messages": tool_loop_request().messages[:3]}
+    )
+    assert len({
+        base,
+        cache_key(tool_loop_request(tool_choice="none")),
+        cache_key(tool_loop_request(tools=())),
+        cache_key(without_result),
+    }) == 4  # fmt: skip
+
+
+def test_client_sends_tools_calls_and_results_in_the_api_format():
+    http = FakeHTTP((200, completion("NVDA looks strong [P:rsi_14].")))
+    DeepSeekClient("sk", post=http).complete(tool_loop_request(tool_choice="none"))
+    body = http.calls[0][1]["json"]
+    assert body["tools"] == [{"type": "function", "function": TOOL.model_dump()}]
+    assert body["tool_choice"] == "none"
+    assert body["messages"][2] == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "get_indicators", "arguments": "{}"}},
+        ],
+    }  # fmt: skip
+    assert body["messages"][3] == {
+        "role": "tool", "content": '{"P:rsi_14": 61}', "tool_call_id": "call_1",
+    }  # fmt: skip
+    assert body["messages"][0] == {"role": "system", "content": "Use the tool."}
+
+
+def test_client_leaves_tools_out_when_there_are_none():
+    http = FakeHTTP((200, completion()))
+    DeepSeekClient("sk", post=http).complete(request())
+    assert "tools" not in http.calls[0][1]["json"]
+    assert "tool_choice" not in http.calls[0][1]["json"]
+
+
+def test_client_reads_the_calls_the_model_asks_for():
+    asked = {
+        "id": "call_9", "type": "function",
+        "function": {"name": "search_news", "arguments": '{"query": "export", "limit": 5}'},
+    }  # fmt: skip
+    answer = completion("", tool_calls=[asked])
+    answer["choices"][0]["finish_reason"] = "tool_calls"
+    response = DeepSeekClient("sk", post=FakeHTTP((200, answer))).complete(tool_loop_request())
+    assert response.tool_calls == (
+        ToolCall(id="call_9", name="search_news", arguments='{"query": "export", "limit": 5}'),
+    )
+    assert (response.text, response.finish_reason) == ("", "tool_calls")
+
+
+def test_tool_calls_survive_the_cache(cache):
+    class Calling:
+        calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            return LLMResponse(text="", tool_calls=(CALL,), finish_reason="tool_calls")
+
+    client = Calling()
+    llm_ = CachedLLM(cache, client)
+    first = llm_.complete(tool_loop_request())
+    second = llm_.complete(tool_loop_request())
+    assert second.cached and client.calls == 1
+    assert second.tool_calls == first.tool_calls == (CALL,)
+    assert second.finish_reason == "tool_calls"
