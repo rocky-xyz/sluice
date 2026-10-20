@@ -201,3 +201,47 @@ def test_the_screen_budget_runs_out(root):
     assert log.remaining("screen") == 0
     with pytest.raises(TrialBudgetExhausted):
         do_screen(world, root, {"tools.max_calls": 4})
+
+
+# --- paths found untested by the step-9 coverage check ---
+
+
+def test_a_full_evaluation_needs_every_champion_run_before_spending(root):
+    world = World(root)
+    do_screen(world, root, {"tools.max_calls": 4})
+    key = f"v3-{load_config('v3', root).digest}"
+    world.saved[key] = [d for d in world.saved[key] if d.repeat < 2]  # repeat 2 missing
+    ran = len(world.ran)
+    with pytest.raises(ValueError, match="champion lacks 45 of the 135 validation runs"):
+        do_full(world, root, {"tools.max_calls": 4})
+    assert len(world.ran) == ran and PipelineLog(root).used("full") == 0
+
+
+def test_a_full_evaluation_done_before_is_not_run_again(root):
+    world = World(root)
+    do_screen(world, root, {"tools.max_calls": 8, "debate_rounds": 0})
+    log = PipelineLog(root)
+    first = log.entries()[0]
+    assert first.status == "failed"
+    # rewrite the log so that screen reads as passed, to reach the full stage twice
+    log.path.write_text(log.path.read_text().replace('"failed"', '"passed"'))
+    rejected = do_full(world, root, {"tools.max_calls": 8, "debate_rounds": 0})
+    assert rejected.status == "rejected"
+    ran = len(world.ran)
+    again = do_full(world, root, {"tools.max_calls": 8, "debate_rounds": 0})
+    assert (again.status, again.entry) == ("done before", rejected.entry)
+    assert len(world.ran) == ran
+
+
+def test_screen_score_needs_spread_on_both_sides():
+    cells = screen_cells(DAYS, TICKERS)
+    flat = [
+        Labelled(
+            Decision(ticker=c.ticker, day=c.day, repeat=0, config="x", run_id=None,
+                     rating="hold", confidence=None),
+            label(c.ticker, c.day),
+        )
+        for c in cells
+    ]  # fmt: skip
+    assert screen_score(flat, cells) == (None, 0)  # every rating the same: no rank to compare
+    assert screen_score(flat[:2], cells)[0] is None  # too few labelled cells

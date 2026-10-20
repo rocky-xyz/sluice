@@ -4,11 +4,12 @@ from typing import ClassVar
 
 import pytest
 
+from sluice.agents.cache import CallCache
 from sluice.agents.config import ToolsConfig
 from sluice.agents.graph import run
-from sluice.agents.llm import LLMRequest, LLMResponse, ToolCall
-from sluice.agents.loop import LIMIT_REACHED, NO_DATA, tool_analyst
-from sluice.agents.state import Meta, cited_refs, dump_state
+from sluice.agents.llm import CachedLLM, LLMError, LLMRequest, LLMResponse, ToolCall
+from sluice.agents.loop import LIMIT_REACHED, NO_DATA, answer_followups, tool_analyst
+from sluice.agents.state import Meta, Question, Report, cited_refs, dump_state
 from sluice.agents.tools import ToolContext
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.store import NewsStore
@@ -194,9 +195,6 @@ def test_an_analyst_whose_tools_return_nothing_writes_no_data(tmp_path):
             run_id="x", ticker="NVDA", decision_time=CLOSE, mode="backtest",
             config_version="t1", config_digest="abc", repeat=0,
         )  # fmt: skip
-        from sluice.agents.cache import CallCache
-        from sluice.agents.llm import CachedLLM
-
         model = Agents()
         with CallCache(tmp_path / "c.db") as cache:
             out = tool_analyst({"meta": meta}, CachedLLM(cache, model), TOOLED, "news_analyst", ctx)
@@ -346,3 +344,54 @@ def test_the_shipped_v3_uses_tools_and_keeps_v1s_debate_prompts():
     assert v3.prompts["bull"] == v1.prompts["bull"] and v3.prompts["bear"] == v1.prompts["bear"]
     for role in ("market_analyst", "news_analyst", "fundamentals_analyst"):
         assert "limited number of tool calls" in v3.prompts[role]
+
+
+# --- paths that need a failing model (added after the step-9 coverage check) ---
+
+
+def test_a_call_that_finally_fails_ends_the_run_and_keeps_what_was_fetched(stocked, tmp_path):
+    def breaks(request):
+        if not tool_results(request):
+            return ask(("get_indicators", {}))
+        raise LLMError("HTTP 400: bad request")  # not retryable
+
+    state = go(pipeline(stocked, tmp_path, Agents(market_analyst=breaks), config=TOOLED))
+    assert state["meta"].status == "failed"
+    assert state["meta"].failure == "market_analyst: HTTP 400: bad request"
+    fetched = [u for u in state["retrieved"] if u.role == "market_analyst"]
+    assert [u.tool for u in fetched] == ["get_indicators"]
+    assert [c.role for c in state["usage"]].count("market_analyst") == 1  # the paid answer
+
+
+def test_a_follow_up_whose_call_fails_is_noted_and_the_run_goes_on(stocked, tmp_path):
+    def breaks_on_follow_up(request):
+        if "The research manager asks" in request.messages[1].content:
+            raise LLMError("HTTP 400: bad request")
+        return news_answering(request)
+
+    model = Agents(
+        research_manager=manager_asking(("news", "Why?")), news_analyst=breaks_on_follow_up
+    )
+    state = go(pipeline(stocked, tmp_path, model, config=TOOLED))
+    (followup,) = state["followups"]
+    assert not followup.answered and "HTTP 400" in followup.answer
+    assert state["meta"].status == "ok" and state["decision"] is not None
+
+
+def test_a_follow_up_with_nothing_to_go_on_says_so(tmp_path):
+    with NewsStore(tmp_path / "n.db") as news, PriceStore(tmp_path / "p.db") as prices:
+        ctx = ToolContext("NVDA", CLOSE, news, prices, FundamentalsStore(tmp_path / "s"), TOOLED)
+        meta = Meta(
+            run_id="x", ticker="NVDA", decision_time=CLOSE, mode="backtest",
+            config_version="t1", config_digest="abc", repeat=0,
+        )  # fmt: skip
+        state = {
+            "meta": meta,
+            "reports": {"news": Report(text="No news was available.", no_data=True)},
+            "pending": [Question(analyst="news", question="Anything new?")],
+        }
+        with CallCache(tmp_path / "c.db") as cache:
+            out = answer_followups(state, CachedLLM(cache, Agents()), TOOLED, lambda: ctx)
+    (followup,) = out["followups"]
+    assert (followup.answered, followup.answer) == (False, "No data was available to answer.")
+    assert out["pending"] == []
