@@ -1689,3 +1689,49 @@ def patterns_review(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(review.page(chosen, config, confirmations, notes))
     typer.echo(f"{len(chosen)} examples written to {path}")
+
+
+@patterns_app.command("study")
+def patterns_study(
+    version: Annotated[
+        str, typer.Option("--config", help="Pattern rules under configs/patterns/.")
+    ] = "v1",
+    name: Annotated[str, UNIVERSE_OPTION] = "sp500-2026-10",
+    db: Annotated[Path, typer.Option("--db", help="The pattern study's price store.")] = Path(
+        "data/local/patterns/prices.db"
+    ),
+    refresh: Annotated[bool, typer.Option("--refresh", help="Refit months already saved.")] = False,
+) -> None:
+    """Label every pattern event and fit one statistics table per month (walk-forward). Free."""
+    from datetime import UTC, datetime
+
+    from sluice.market_calendar import last_closed_session
+    from sluice.patterns import study, universe
+    from sluice.patterns.candles import candles, weekly
+    from sluice.patterns.config import load_pattern_config
+    from sluice.patterns.detect import detect
+    from sluice.prices.store import PriceStore
+
+    config = load_pattern_config(version)
+    label = f"{config.version}-{config.digest}"
+    through = last_closed_session(datetime.now(UTC))
+    found: list[study.Outcome] = []
+    baseline = study.Baseline.empty()
+    with PriceStore(db) as store:
+        spy_bars = store.history("SPY", through, 4000)
+        spy = {b.day: b for b in spy_bars}
+        market = {c.day: c for c in candles(spy_bars)}
+        for symbol in universe.load(name):
+            bars = store.history(symbol, through, 4000)
+            events = detect(candles(bars), candles(weekly(bars)), market, config)
+            found += study.outcomes(symbol, bars, spy, events)
+            baseline.add(bars, spy)
+    saved = {t.as_of for t in study.load_all(label)}
+    written = 0
+    for moment in study.month_starts(study.FIRST_TABLE, through):
+        if moment in saved and not refresh:
+            continue
+        rows = study.table(found, baseline, moment)
+        study.save(study.StoredStats(moment, label, name, rows))
+        written += 1
+    typer.echo(f"{len(found)} labelled outcomes; {written} monthly tables written for {label}")
