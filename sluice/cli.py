@@ -326,11 +326,20 @@ def evaluate(
         Path, typer.Option("--runs", help="Where the batch run states are.")
     ] = Path("data/local/runs"),
     out: Annotated[
-        Path, typer.Option("--out", help="Write the report here as Markdown.")
-    ] = Path("data/local/evaluation/validation.md"),
+        Path | None,
+        typer.Option("--out", help="Write the report here as Markdown (default by segment)."),
+    ] = None,
     sizing: Annotated[
         str | None,
         typer.Option("--sizing", help="Also size with this config under configs/sizing/."),
+    ] = None,
+    final: Annotated[
+        str | None,
+        typer.Option(
+            "--final",
+            help="The one evaluation of a sealed segment (test_1, later test_2): the champion "
+            "against every baseline. Opens the seal; cannot be repeated.",
+        ),
     ] = None,
 ) -> None:
     """Portfolio backtest of pipeline ratings on the validation period, against the baselines."""
@@ -338,9 +347,7 @@ def evaluate(
 
     from sluice.agents.batch import run_dir
     from sluice.agents.config import load_config
-    from sluice.evaluation.decisions import load_decisions
-    from sluice.evaluation.quality import label_decisions
-    from sluice.evaluation.report import calendar, evaluate, render, render_quality
+    from sluice.evaluation.report import build
     from sluice.news.store import NewsStore
     from sluice.news.weight_tables import DEFAULT_ROOT, load_all
     from sluice.prices.store import PriceStore
@@ -350,12 +357,15 @@ def evaluate(
     from sluice.sizing import plan
     from sluice.sizing.config import load_sizing_config
 
+    symbols = [t.strip() for t in tickers.split(",") if t.strip()]
+    if final:
+        _evaluate_final(final, symbols, runs, out)
+        return
     folders = [run_dir(runs, load_config(name)) for name in configs or ["v1", "v2"]]
     if absent := [str(f) for f in folders if not f.is_dir()]:
         typer.echo(f"No runs in {', '.join(absent)} (run sluice batch first).", err=True)
         raise typer.Exit(code=2)
-    symbols = [t.strip() for t in tickers.split(",") if t.strip()]
-    cal = calendar("validation")
+    out = out or Path("data/local/evaluation/validation.md")
     with (
         PriceStore(fetch=fetch_bars) as prices,
         NewsStore(Path("data/news.db")) as news,
@@ -363,35 +373,109 @@ def evaluate(
         ReportScoreStore() as report_scores,
     ):
         try:
-            extra: list = []
-            if sizing:
-                config = load_sizing_config(sizing)
+            config = load_sizing_config(sizing) if sizing else None
+            src = None
+            if config:
                 tables = load_all(DEFAULT_ROOT, config.inputs.scoring_config)
                 src = plan.Sources(news, scores, tables, report_scores, prices)
-                markets = {d: plan.market(src, symbols, d, config) for d in cal.decisions}
-                rebalances = dict(zip(cal.decisions, cal.rebalances, strict=True))
-                label = f"sizing {config.version}-{config.digest}"
-                for folder in folders:
-                    decisions = load_decisions(folder, "validation")
-                    for repeat, (schedule, missing) in plan.formula_schedules(
-                        decisions, markets, rebalances, src, config
-                    ).items():
-                        extra.append((f"{folder.name} r{repeat} + {label}", schedule, missing))
-                for name, schedule in plan.ablations(markets, rebalances, config).items():
-                    extra.append((f"{name}，{label}", schedule, None))
-            results = evaluate(folders, symbols, prices, extra=extra)
-            now = datetime.now(UTC)
-            decided = {f.name: load_decisions(f, "validation") for f in folders}
-            labelled = {
-                name: label_decisions(decisions, prices, now) for name, decisions in decided.items()
-            }
+            report = build(folders, folders, symbols, prices, src, config, datetime.now(UTC))
         except ValueError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
-    report = render(results, cal, "validation") + render_quality(decided, labelled)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report)
     Console().print(report, markup=False)
+    Console().print(f"written to {out}")
+
+
+def _evaluate_final(segment: str, symbols: list[str], runs: Path, out: Path | None) -> None:
+    """Check everything, score the segment's reports, work the report out, then open the seal."""
+    import os
+    from datetime import UTC, datetime
+
+    from sluice.agents.batch import run_dir
+    from sluice.agents.cache import CallCache
+    from sluice.agents.config import load_config
+    from sluice.evaluation import final as fin
+    from sluice.evaluation.decisions import load_decisions
+    from sluice.evaluation.report import build, calendar
+    from sluice.evaluation.seal import AlreadyOpened, opened
+    from sluice.evaluation.split import SEALED, SealedError
+    from sluice.evolution.library import load_champion
+    from sluice.news.store import NewsStore
+    from sluice.news.weight_tables import DEFAULT_ROOT, load_all
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+    from sluice.scoring.client import ENV_KEY, CachedJev, JevClient
+    from sluice.scoring.config import load_report_scoring_config
+    from sluice.scoring.reports import ReportScoreStore, load_reports, score_reports
+    from sluice.scoring.store import ScoreStore
+    from sluice.sizing import plan
+
+    def refuse(message: str) -> None:
+        typer.echo(f"{message}. The seal stays closed.", err=True)
+        raise typer.Exit(code=2)
+
+    if segment not in SEALED:
+        refuse(f"{segment} is not a sealed segment")
+    if any(seal.segment == segment for seal in opened()):
+        refuse(f"{segment} has already had its one evaluation")
+    commit = _commit(paths=("sluice", "configs"))
+    champion = load_champion()
+    pipeline = run_dir(runs, load_config(fin.PIPELINE))
+    external = runs / fin.EXTERNAL
+    now = datetime.now(UTC)
+    try:
+        cal = calendar(segment, final=True)
+    except ValueError as exc:
+        refuse(str(exc))
+    if late := fin.too_early(cal, now):
+        refuse(late)
+    problems = []
+    for name, folder in ((fin.PIPELINE, pipeline), (fin.EXTERNAL, external)):
+        decisions = load_decisions(folder, segment, final=True) if folder.is_dir() else []
+        problems += fin.missing_runs(name, decisions, symbols, cal, fin.REPEATS[name])
+    if problems:
+        refuse("; ".join(problems))
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        refuse(f"{ENV_KEY} is not set: the segment's analyst reports need scoring")
+
+    with (
+        PriceStore(fetch=fetch_bars) as prices,
+        NewsStore(Path("data/news.db")) as news,
+        ScoreStore() as scores,
+        ReportScoreStore() as report_scores,
+        CallCache() as cache,
+    ):
+        spec = load_report_scoring_config(champion.inputs.report_spec)
+        items = load_reports(pipeline, segment, final=True)
+        scored = score_reports(items, report_scores, spec, CachedJev(cache, JevClient(key)), 4)
+        if scored.failed:
+            refuse(f"{scored.failed} reports could not be scored; run again")
+        tables = load_all(DEFAULT_ROOT, champion.inputs.scoring_config)
+        src = plan.Sources(news, scores, tables, report_scores, prices)
+
+        def compute() -> str:
+            return build(
+                [pipeline, external], [pipeline], symbols, prices, src, champion, now,
+                requested=segment, final=True,
+            )  # fmt: skip
+
+        try:
+            seal, report = fin.evaluate_once(
+                segment, compute, fin.sealed_config(pipeline.name, champion), commit
+            )
+        except (ValueError, SealedError, AlreadyOpened) as exc:
+            refuse(str(exc))
+    header = (
+        f"> 最终评估，只此一次：{seal.segment} 于 {seal.opened_at:%Y-%m-%d %H:%M} UTC 开封；"
+        f"配置 {seal.config}；提交 {seal.commit}。\n\n"
+    )
+    out = out or Path(f"data/local/evaluation/{segment}.md")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Console().print(header + report, markup=False)  # shown first: the seal is already open
+    out.write_text(header + report)
     Console().print(f"written to {out}")
 
 
@@ -940,17 +1024,16 @@ def news_backfill(
         raise typer.Exit(code=1)
 
 
-def _commit() -> str:
-    """HEAD, refusing uncommitted changes under sluice/: the log's commit must reproduce a trial."""
+def _commit(paths: tuple[str, ...] = ("sluice",)) -> str:
+    """HEAD, refusing uncommitted changes under `paths`: the recorded commit must reproduce."""
     import subprocess
 
     def git(*args: str) -> str:
         return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
-    if git("status", "--porcelain", "--", "sluice").strip():
-        typer.echo(
-            "sluice/ has uncommitted changes; commit them before running the gate.", err=True
-        )
+    if git("status", "--porcelain", "--", *paths).strip():
+        listed = ", ".join(f"{p}/" for p in paths)
+        typer.echo(f"{listed} has uncommitted changes; commit them first.", err=True)
         raise typer.Exit(code=2)
     return git("rev-parse", "--short", "HEAD").strip()
 

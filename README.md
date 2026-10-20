@@ -115,6 +115,7 @@ sluice batch --config v2                 # the same with weighted news (needs TY
 sluice score                             # score stored news with Jev (needs TYPESAFE_API_KEY; resumable)
 sluice evaluate                          # portfolio backtest of v1 and v2 ratings on the validation period
 sluice evaluate --sizing v1              # the same, plus the sizing formula and its controls
+sluice evaluate --final test_1           # the one evaluation of the sealed test period: champion vs every baseline
 sluice score-reports                     # Jev's stance on each analyst report of the validation runs
 sluice evolve seed                       # log the sizing configs already seen; put the two controls through the gate
 sluice evolve try --set k=0.3           # one hand-written sizing change through the gate (uses a trial)

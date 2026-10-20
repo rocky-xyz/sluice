@@ -10,7 +10,7 @@ and at the doubled one.
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sluice.agents.batch import decision_days
@@ -22,6 +22,8 @@ from sluice.evaluation.portfolio import target_weights
 from sluice.evaluation.split import TEST_1, VALIDATION, Segment, require_open
 from sluice.market_calendar import close_of, next_open_after
 from sluice.prices.store import PriceStore
+from sluice.sizing import plan
+from sluice.sizing.config import SizingConfig
 
 COSTS = (0.001, 0.002)  # the main cost and the sensitivity check
 BENCHMARKS = ("SPY", "QQQ")
@@ -153,7 +155,9 @@ def evaluate(
     return results
 
 
-def render(results: list[Result], cal: Calendar, requested: Segment) -> str:
+def render(
+    results: list[Result], cal: Calendar, requested: Segment, missing_baseline: bool = True
+) -> str:
     def pct(x: float | None) -> str:
         return "-" if x is None else f"{x:+.2%}"
 
@@ -183,7 +187,8 @@ def render(results: list[Result], cal: Calendar, requested: Segment) -> str:
                 f"| {pct(r.total_return)} | {num(r.turnover)} | {r.costs:.3%} "
                 f"| {'-' if r.neutral is None else r.neutral} |"
             )
-        lines.append(f"| {MISSING_BASELINE} | 缺（推迟到 7.7，只在测试期跑） | | | | | | |")
+        if missing_baseline:
+            lines.append(f"| {MISSING_BASELINE} | 缺（推迟到 7.7，只在测试期跑） | | | | | | |")
     return "\n".join(lines) + "\n"
 
 
@@ -240,3 +245,39 @@ def render_quality(configs: dict[str, list[Decision]], labelled: dict[str, list]
                 f"评级分数平均标准差 {c.mean_std:.2f}"
             )
     return "\n".join(lines) + "\n"
+
+
+def build(
+    folders: list[Path],
+    sized: list[Path],
+    tickers: list[str],
+    prices: PriceStore,
+    src: plan.Sources | None,
+    sizing: SizingConfig | None,
+    now: datetime,
+    requested: Segment = "validation",
+    final: bool = False,
+) -> str:
+    """The whole report: rating tilts of `folders`, the sizing formula on `sized`, the
+    formula's two controls, the baselines, and decision quality. Writes nothing."""
+    cal = calendar(requested, final)
+    extra: Extra = []
+    if sizing is not None and src is not None:
+        markets = {d: plan.market(src, tickers, d, sizing) for d in cal.decisions}
+        rebalances = dict(zip(cal.decisions, cal.rebalances, strict=True))
+        label = f"sizing {sizing.version}-{sizing.digest}"
+        for folder in sized:
+            decisions = load_decisions(folder, requested, final)
+            for repeat, (schedule, missing) in plan.formula_schedules(
+                decisions, markets, rebalances, src, sizing
+            ).items():
+                extra.append((f"{folder.name} r{repeat} + {label}", schedule, missing))
+        for name, schedule in plan.ablations(markets, rebalances, sizing).items():
+            extra.append((f"{name}，{label}", schedule, None))
+    results = evaluate(folders, tickers, prices, requested, final, extra)
+    decided = {f.name: load_decisions(f, requested, final) for f in folders}
+    labelled = {name: quality.label_decisions(ds, prices, now) for name, ds in decided.items()}
+    has_external = any(f.name.startswith("tradingagents") for f in folders)
+    return render(results, cal, requested, missing_baseline=not has_external) + render_quality(
+        decided, labelled
+    )
