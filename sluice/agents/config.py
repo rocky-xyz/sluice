@@ -33,6 +33,22 @@ class FundamentalsConfig(BaseModel):
     quarters: int = Field(gt=0)  # how many of the latest visible quarters are shown
 
 
+class ToolsConfig(BaseModel):
+    """The rules of the analysts' tool loop (docs/specs/08-agent-harness.md, task 9.3).
+
+    A config without a [tools] section prefetches, as before; with one, the
+    analysts call tools within these limits.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_calls: int = Field(default=6, ge=0)  # per analyst; then it must write its report
+    followup_rounds: int = Field(default=1, ge=0)  # the research manager sending questions back
+    followup_calls: int = Field(default=3, ge=0)  # per analyst answering one
+    history_max_days: int = Field(default=250, gt=0)  # get_price_history
+    search_max_limit: int = Field(default=20, gt=0)  # items per search_news call
+
+
 class PipelineConfig(BaseModel):
     """One version of everything about the pipeline that may be changed and compared."""
 
@@ -48,6 +64,7 @@ class PipelineConfig(BaseModel):
     news: NewsConfig
     fundamentals: FundamentalsConfig
     prompts: dict[str, str]  # role -> system prompt
+    tools: ToolsConfig | None = None  # None: the data is prefetched, as in v1 and v2
 
 
 def load_config(version: str = "v1", root: Path = CONFIG_ROOT) -> PipelineConfig:
