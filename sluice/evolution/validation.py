@@ -16,7 +16,7 @@ from datetime import date
 from pathlib import Path
 
 from sluice.agents.batch import run_dir
-from sluice.agents.config import load_config
+from sluice.agents.config import PipelineConfig, load_config
 from sluice.evaluation.backtest import simulate
 from sluice.evaluation.decisions import Decision, load_decisions
 from sluice.evaluation.report import COSTS, Calendar, calendar, load_prices
@@ -29,13 +29,15 @@ PIPELINE = "v1"  # unweighted news: the one with three repeats (docs/specs/06, t
 BENCHMARK = "SPY"
 
 
-def require_complete(decisions: list[Decision], tickers: list[str], cal: Calendar) -> None:
+def require_complete(
+    decisions: list[Decision], tickers: list[str], cal: Calendar, name: str = PIPELINE
+) -> None:
     grid = {(day, ticker) for day in cal.decisions for ticker in tickers}
     for repeat in range(REPEATS):
         have = {(d.day, d.ticker) for d in decisions if d.repeat == repeat}
         if missing := grid - have:
             raise ValueError(
-                f"{PIPELINE} repeat {repeat} has {len(grid) - len(missing)} of {len(grid)} "
+                f"{name} repeat {repeat} has {len(grid) - len(missing)} of {len(grid)} "
                 "validation runs; finish the batch first"
             )
 
@@ -56,13 +58,20 @@ class Period:
 class Validation:
     """Call it with a sizing config for its daily returns per repeat (a `gate.Backtest`)."""
 
-    def __init__(self, src: plan.Sources, prices: PriceStore, tickers: list[str], runs: Path):
+    def __init__(
+        self,
+        src: plan.Sources,
+        prices: PriceStore,
+        tickers: list[str],
+        runs: Path,
+        pipeline: PipelineConfig | None = None,  # whose ratings; v1 unless given (task 9.9)
+    ):
         self.src, self.tickers = src, tickers
         self.cal = calendar("validation")
         self.bars = load_prices(prices, [*tickers, BENCHMARK], self.cal)
-        folder = run_dir(runs, load_config(PIPELINE))
+        folder = run_dir(runs, pipeline or load_config(PIPELINE))
         self.decisions = [d for d in load_decisions(folder, "validation") if d.repeat < REPEATS]
-        require_complete(self.decisions, tickers, self.cal)
+        require_complete(self.decisions, tickers, self.cal, folder.name)
         self.rebalances = dict(zip(self.cal.decisions, self.cal.rebalances, strict=True))
 
     def _plan(self, config: SizingConfig):

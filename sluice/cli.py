@@ -1222,3 +1222,247 @@ def evolve_propose(
             console.print("dry run: not put through the gate, no trial used", markup=False)
             return
         _show(propose(proposal.changes, "llm", validation, commit, proposal.rationale))
+
+
+def _pipeline_changes(sets: list[str] | None, prompts: list[str] | None) -> dict:
+    """--set key=value (rules) and --prompt role=FILE (a whole prompt) as a proposal."""
+    import tomllib
+
+    changes: dict = {}
+    for item in sets or []:
+        key, sep, value = item.partition("=")
+        try:
+            if not sep:
+                raise ValueError("no '='")
+            changes[key.strip()] = tomllib.loads(f"v = {value.strip()}")["v"]
+        except ValueError as exc:
+            typer.echo(f"--set {item}: expected key=value ({exc})", err=True)
+            raise typer.Exit(code=2) from exc
+    for item in prompts or []:
+        role, sep, path = item.partition("=")
+        if not sep or not Path(path).is_file():
+            typer.echo(f"--prompt {item}: expected role=FILE with the new prompt", err=True)
+            raise typer.Exit(code=2)
+        changes[f"prompts.{role.strip()}"] = Path(path).read_text()
+    return changes
+
+
+@contextmanager
+def _pipeline_gate(runs: Path, workers: int, tickers: list[str]) -> Iterator:
+    """The runner, saved-run reader, labeller and portfolio the pipeline gate is handed."""
+    import os
+    from datetime import UTC, datetime
+
+    from rich.progress import Progress
+
+    from sluice.agents import batch as batching
+    from sluice.agents.cache import CallCache
+    from sluice.agents.graph import Deps, build_graph, open_checkpointer
+    from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient
+    from sluice.evaluation.decisions import load_decisions
+    from sluice.evaluation.quality import label_decisions
+    from sluice.evolution.library import load_champion as load_sizing_champion
+    from sluice.evolution.validation import Validation
+    from sluice.fundamentals.store import FundamentalsStore
+    from sluice.news.store import NewsStore
+    from sluice.news.weight_tables import DEFAULT_ROOT, load_all
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+    from sluice.scoring import client as jev_client
+    from sluice.scoring.config import load_report_scoring_config
+    from sluice.scoring.reports import ReportScoreStore, load_reports, score_reports
+    from sluice.scoring.store import ScoreStore
+    from sluice.sizing import plan
+
+    keys = {name: os.environ.get(name, "").strip() for name in (ENV_KEY, jev_client.ENV_KEY)}
+    if missing := [name for name, value in keys.items() if not value]:
+        typer.echo(f"{', '.join(missing)} not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    sizing = load_sizing_champion()
+    statements = FundamentalsStore()
+    checkpointer = open_checkpointer()
+    opened: list = []
+    console = Console()
+    try:
+        with (
+            PriceStore(fetch=fetch_bars) as prices,
+            CallCache() as cache,
+            NewsStore(Path("data/news.db")) as news,
+            ScoreStore() as scores,
+            ReportScoreStore() as report_scores,
+        ):
+            llm = CachedLLM(cache, DeepSeekClient(keys[ENV_KEY]))
+            jev = jev_client.CachedJev(cache, jev_client.JevClient(keys[jev_client.ENV_KEY]))
+            now = datetime.now(UTC)
+
+            def run(config, cells):
+                if problems := batching.unprepared(
+                    cells, statements, prices, config.prices.benchmark
+                ):
+                    raise ValueError("not ready: " + "; ".join(problems))
+
+                def make_graph():
+                    store = NewsStore(Path("data/news.db"))
+                    opened.append(store)
+                    return build_graph(Deps(store, prices, statements, llm, config), checkpointer)
+
+                with Progress(console=console) as bar:
+                    task = bar.add_task(f"{config.version}-{config.digest}", total=len(cells))
+                    return batching.run_batch(
+                        cells, config, make_graph, runs, workers, lambda _: bar.advance(task)
+                    )
+
+            def decisions(config):
+                folder = batching.run_dir(runs, config)
+                return load_decisions(folder, "validation") if folder.is_dir() else []
+
+            def label(found):
+                return label_decisions(found, prices, now)
+
+            def portfolio(config):
+                # the sizing formula reads Jev's stance on the reports: score them first (cached)
+                folder = batching.run_dir(runs, config)
+                spec = load_report_scoring_config(sizing.inputs.report_spec)
+                score_reports(load_reports(folder, "validation"), report_scores, spec, jev, 4)
+                tables = load_all(DEFAULT_ROOT, sizing.inputs.scoring_config)
+                src = plan.Sources(news, scores, tables, report_scores, prices)
+                return Validation(src, prices, tickers, runs, pipeline=config)(sizing)
+
+            yield run, decisions, label, portfolio
+    finally:
+        for store in opened:
+            store.close()
+        checkpointer.conn.close()
+
+
+def _pipeline_stage(stage: str, sets, prompts, rationale, yes, runs, workers) -> None:
+    from sluice.agents import batch as batching
+    from sluice.evaluation.report import calendar
+    from sluice.evolution import pipeline_gate as pg
+    from sluice.evolution.pipeline_log import PipelineLog
+    from sluice.evolution.pipelines import candidate, check, load_champion
+
+    changes = _pipeline_changes(sets, prompts)
+    champion = load_champion()
+    tickers = list(COMPANIES)
+    days = calendar("validation").decisions
+    cells = pg.screen_cells(days, tickers) if stage == "screen" else pg.full_cells(days, tickers)
+    if not yes:
+        if problems := check(champion, changes):
+            typer.echo("Would be refused: " + "; ".join(problems), err=True)
+            raise typer.Exit(code=2)
+        proposed = candidate(champion, changes)
+        folder = batching.run_dir(runs, proposed)
+        done = sum(
+            (folder / c.ticker / f"{c.day}_r{c.repeat}.json").exists() for c in cells
+        )
+        todo = len(cells) - done
+        cost = todo * pg.COST_PER_RUN
+        parent = f"{champion.version}-{champion.digest}"
+        held = batching.run_dir(runs, champion)
+        lacking = sum(
+            not (held / c.ticker / f"{c.day}_r{c.repeat}.json").exists() for c in cells
+        )
+        if lacking:
+            typer.echo(f"Not ready: the champion lacks {lacking} of these {len(cells)} runs.")
+        screened = PipelineLog().find("screen", proposed.digest, parent)
+        if stage == "full" and (screened is None or screened.status != "passed"):
+            typer.echo("Would be refused: no passed screen of these parameters yet.")
+        typer.echo(
+            f"{stage} of {proposed.version}-{proposed.digest} against "
+            f"{champion.version}-{champion.digest}: {len(cells)} runs, {done} already saved, "
+            f"{todo} to run; about ${cost:.2f} at peak list prices (about half off-peak). "
+            "Nothing was run or logged; add --yes to run it."
+        )
+        return
+    commit = _commit()
+    with _pipeline_gate(runs, workers, tickers) as (run, decisions, label, portfolio):
+        try:
+            if stage == "screen":
+                outcome = pg.screen(changes, "manual", run, decisions, label, cells, commit, rationale)
+            else:
+                outcome = pg.full(changes, "manual", run, decisions, portfolio, cells, commit, rationale)
+        except (ValueError, RuntimeError) as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+    e = outcome.entry
+    lines = [f"{outcome.status}" + (f" ({e.stage} {e.n})" if e.n else "")]
+    lines += [f"  problem: {p}" for p in e.problems]
+    if e.evidence is not None and e.stage == "screen":
+        ev = e.evidence
+        lines.append(
+            f"  Spearman on {ev.cells} cells: candidate {ev.candidate_spearman}, champion "
+            f"{ev.champion_spearman}; failed runs {ev.candidate_failed} vs {ev.champion_failed}"
+        )
+    elif e.evidence is not None:
+        ev = e.evidence
+        pairs = ", ".join(
+            f"{c:.2f} vs {h:.2f}"
+            for c, h in zip(ev.candidate_sharpes, ev.champion_sharpes, strict=True)
+        )
+        lines.append(f"  Sharpe per repeat: {pairs}; z {ev.z:+.2f}")
+    if outcome.version:
+        lines.append(f"  pipeline champion is now {outcome.version}")
+    Console().print("\n".join(lines), markup=False)
+
+
+SETS_OPTION = typer.Option("--set", help="A rule, key=value, e.g. tools.max_calls=4.")
+PROMPTS_OPTION = typer.Option("--prompt", help="A whole prompt, role=FILE.")
+YES_OPTION = typer.Option("--yes", help="Run it and pay; without it, only the estimate.")
+
+
+@evolve_app.command("screen")
+def evolve_screen(
+    sets: Annotated[list[str] | None, SETS_OPTION] = None,
+    prompts: Annotated[list[str] | None, PROMPTS_OPTION] = None,
+    rationale: Annotated[str, typer.Option("--rationale", help="Why, for the log.")] = "",
+    yes: Annotated[bool, YES_OPTION] = False,
+    runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs"),
+    workers: Annotated[int, typer.Option("--workers", help="Runs going on at a time.")] = 4,
+) -> None:
+    """Screen a pipeline change on 55 fixed validation cells (costs money; one of 30 screens)."""
+    _pipeline_stage("screen", sets, prompts, rationale, yes, runs, workers)
+
+
+@evolve_app.command("full")
+def evolve_full(
+    sets: Annotated[list[str] | None, SETS_OPTION] = None,
+    prompts: Annotated[list[str] | None, PROMPTS_OPTION] = None,
+    rationale: Annotated[str, typer.Option("--rationale", help="Why, for the log.")] = "",
+    yes: Annotated[bool, YES_OPTION] = False,
+    runs: Annotated[Path, RUNS_OPTION] = Path("data/local/runs"),
+    workers: Annotated[int, typer.Option("--workers", help="Runs going on at a time.")] = 4,
+) -> None:
+    """Fully evaluate a screened pipeline change: every validation cell, three repeats."""
+    _pipeline_stage("full", sets, prompts, rationale, yes, runs, workers)
+
+
+@evolve_app.command("pipeline-status")
+def evolve_pipeline_status() -> None:
+    """The pipeline champion, the screens and full evaluations left, and their log."""
+    from sluice.evolution.pipeline_log import PipelineLog
+    from sluice.evolution.pipelines import load_champion
+
+    champion = load_champion()
+    log = PipelineLog()
+    console = Console()
+    console.print(
+        f"pipeline champion {champion.version}-{champion.digest}; screens left "
+        f"{log.remaining('screen')}, full evaluations left {log.remaining('full')}",
+        markup=False,
+    )
+    table = Table("stage", "n", "status", "layer", "changes", "result", "version")
+    for e in log.entries():
+        changes = ", ".join(
+            k if k.startswith("prompts.") else f"{k}={v}" for k, v in e.changes.items()
+        ) or "-"
+        if e.evidence is None:
+            result = "; ".join(e.problems) or "-"
+        elif e.stage == "screen":
+            result = f"{e.evidence.candidate_spearman} vs {e.evidence.champion_spearman}"
+        else:
+            result = f"z {e.evidence.z:+.2f}"
+        table.add_row(
+            e.stage, str(e.n or "-"), e.status, e.layer or "-", changes, result, e.version or "-"
+        )
+    console.print(table)

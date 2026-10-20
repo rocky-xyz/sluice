@@ -123,6 +123,10 @@ sluice evolve propose --dry-run          # ask the LLM proposer for one sizing c
 sluice evolve propose                    # the same, then put it through the gate (needs DEEPSEEK_API_KEY)
 sluice evolve status                     # champion, trials left, experiment log
 sluice evolve rollback v1                # point the champion back at an older sizing version
+sluice evolve screen --set tools.max_calls=4         # estimate a pipeline change's screen; add --yes to run it
+sluice evolve screen --prompt news_analyst=new.txt   # the same for one role's whole prompt
+sluice evolve full --set tools.max_calls=4 --yes     # full validation run of a screened change
+sluice evolve pipeline-status                        # pipeline champion, screens and full evaluations left
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
