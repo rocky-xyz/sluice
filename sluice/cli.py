@@ -431,10 +431,14 @@ def _evaluate_final(segment: str, symbols: list[str], runs: Path, out: Path | No
         refuse(str(exc))
     if late := fin.too_early(cal, now):
         refuse(late)
-    problems = []
-    for name, folder in ((fin.PIPELINE, pipeline), (fin.EXTERNAL, external)):
-        decisions = load_decisions(folder, segment, final=True) if folder.is_dir() else []
-        problems += fin.missing_runs(name, decisions, symbols, cal, fin.REPEATS[name])
+    problems = fin.missing_runs(
+        fin.PIPELINE, load_decisions(pipeline, segment, final=True), symbols, cal,
+        fin.REPEATS[fin.PIPELINE],
+    )  # fmt: skip
+    ran = load_decisions(external, segment, final=True) if external.is_dir() else []
+    if ran:  # optional, but all or nothing
+        problems += fin.missing_runs(fin.EXTERNAL, ran, symbols, cal, fin.REPEATS[fin.EXTERNAL])
+    folders = [pipeline, external] if ran else [pipeline]
     if problems:
         refuse("; ".join(problems))
     key = os.environ.get(ENV_KEY, "").strip()
@@ -458,8 +462,8 @@ def _evaluate_final(segment: str, symbols: list[str], runs: Path, out: Path | No
 
         def compute() -> str:
             return build(
-                [pipeline, external], [pipeline], symbols, prices, src, champion, now,
-                requested=segment, final=True,
+                folders, [pipeline], symbols, prices, src, champion, now,
+                requested=segment, final=True, missing_note=fin.NOT_RUN,
             )  # fmt: skip
 
         try:

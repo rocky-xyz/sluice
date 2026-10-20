@@ -20,6 +20,9 @@ from sluice.sizing.config import SizingConfig
 PIPELINE = "v1"  # the champion's pipeline: unweighted news (docs/specs/06, task 7.1)
 EXTERNAL = "tradingagents-1394a3f"  # the original TradingAgents, run outside the repo (6.5)
 REPEATS = {PIPELINE: 3, EXTERNAL: 1}
+# The user chose not to pay for the original on test_1 (2026-10-20): absent is allowed and
+# reported as such; partly run is refused, since its holes would be filled in as hold.
+NOT_RUN = "缺（为控制花费，测试期一未跑）"
 
 
 def sealed_config(pipeline: str, sizing: SizingConfig) -> str:

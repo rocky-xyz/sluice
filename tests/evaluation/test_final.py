@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from sluice.evaluation.decisions import Decision
-from sluice.evaluation.final import evaluate_once, missing_runs, sealed_config, too_early
+from sluice.evaluation.final import NOT_RUN, evaluate_once, missing_runs, sealed_config, too_early
 from sluice.evaluation.report import Calendar, Result, render
 from sluice.evaluation.seal import AlreadyOpened, opened
 from sluice.sizing.config import load_sizing_config
@@ -71,5 +71,8 @@ def test_a_second_evaluation_is_refused_before_anything_is_computed(tmp_path):
 
 def test_the_missing_baseline_row_only_when_it_is_missing():
     result = Result("x", 0.001, 1.0, 1.0, 0.1, 0.1, None, 0.001)
-    assert "缺（推迟到 7.7" in render([result], CAL, "test_1")
-    assert "缺（推迟到 7.7" not in render([result], CAL, "test_1", missing_baseline=False)
+    assert "| 原版 TradingAgents | 缺（推迟到 7.7" in render([result], CAL, "validation")
+    assert "| 原版 TradingAgents | 缺（为控制花费" in render(
+        [result], CAL, "test_1", missing_baseline=NOT_RUN
+    )
+    assert "原版 TradingAgents" not in render([result], CAL, "test_1", missing_baseline=None)

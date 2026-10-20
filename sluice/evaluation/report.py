@@ -28,6 +28,7 @@ from sluice.sizing.config import SizingConfig
 COSTS = (0.001, 0.002)  # the main cost and the sensitivity check
 BENCHMARKS = ("SPY", "QQQ")
 MISSING_BASELINE = "原版 TradingAgents"  # an external file, from task 6.5
+DEFERRED = "缺（推迟到 7.7，只在测试期跑）"  # what the validation report says in its row
 
 
 @dataclass(frozen=True)
@@ -156,7 +157,10 @@ def evaluate(
 
 
 def render(
-    results: list[Result], cal: Calendar, requested: Segment, missing_baseline: bool = True
+    results: list[Result],
+    cal: Calendar,
+    requested: Segment,
+    missing_baseline: str | None = DEFERRED,  # the row's note; None when the baseline is there
 ) -> str:
     def pct(x: float | None) -> str:
         return "-" if x is None else f"{x:+.2%}"
@@ -188,7 +192,7 @@ def render(
                 f"| {'-' if r.neutral is None else r.neutral} |"
             )
         if missing_baseline:
-            lines.append(f"| {MISSING_BASELINE} | 缺（推迟到 7.7，只在测试期跑） | | | | | | |")
+            lines.append(f"| {MISSING_BASELINE} | {missing_baseline} | | | | | | |")
     return "\n".join(lines) + "\n"
 
 
@@ -257,6 +261,7 @@ def build(
     now: datetime,
     requested: Segment = "validation",
     final: bool = False,
+    missing_note: str = DEFERRED,
 ) -> str:
     """The whole report: rating tilts of `folders`, the sizing formula on `sized`, the
     formula's two controls, the baselines, and decision quality. Writes nothing."""
@@ -278,6 +283,7 @@ def build(
     decided = {f.name: load_decisions(f, requested, final) for f in folders}
     labelled = {name: quality.label_decisions(ds, prices, now) for name, ds in decided.items()}
     has_external = any(f.name.startswith("tradingagents") for f in folders)
-    return render(results, cal, requested, missing_baseline=not has_external) + render_quality(
+    note = None if has_external else missing_note
+    return render(results, cal, requested, missing_baseline=note) + render_quality(
         decided, labelled
     )
