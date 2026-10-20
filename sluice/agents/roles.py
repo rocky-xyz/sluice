@@ -14,6 +14,7 @@ from sluice.agents.state import (
     Report,
     Side,
     SignalInput,
+    ToolUse,
     Turn,
     Verdict,
     cited_refs,
@@ -238,12 +239,16 @@ def has_data(reports: dict[str, Report]) -> bool:
     return any(not report.no_data for report in reports.values())
 
 
-def citable_refs(inputs: Inputs, reports: dict[str, Report]) -> set[str]:
+def citable_refs(
+    inputs: Inputs, reports: dict[str, Report], retrieved: list[ToolUse] | None = None
+) -> set[str]:
     """What roles after the analysts may cite: ids that a report cites.
 
-    Reports were checked against the inputs, so these all exist there.
+    Reports were checked against the inputs, or against what the analysts' tools
+    returned (task 9.4), so these all exist there.
     """
-    return set().union(*(cited_refs(r.text) for r in reports.values())) & inputs.refs()
+    known = inputs.refs() | {ref for use in retrieved or [] for ref in use.refs}
+    return set().union(*(cited_refs(r.text) for r in reports.values())) & known
 
 
 def reports_prompt(meta: Meta, reports: dict[str, Report], debate: list[Turn]) -> str:
@@ -262,7 +267,7 @@ def debater(state: PipelineState, llm: CachedLLM, config: PipelineConfig, side: 
     meta, reports = state["meta"], state["reports"]
     debate = state.get("debate", [])
     round_number = sum(turn.side == side for turn in debate) + 1
-    citable = citable_refs(state["inputs"], reports)
+    citable = citable_refs(state["inputs"], reports, state.get("retrieved"))
 
     def check(answer: LLMResponse) -> Turn:
         text = answer.text.strip()
@@ -290,7 +295,7 @@ def research_manager(state: PipelineState, llm: CachedLLM, config: PipelineConfi
         failure = f"{RESEARCH_MANAGER}: no report has any data"
         return {"meta": meta.model_copy(update={"status": "failed", "failure": failure})}
 
-    citable = citable_refs(inputs, reports)
+    citable = citable_refs(inputs, reports, state.get("retrieved"))
 
     def check(answer: LLMResponse) -> Verdict:
         verdict = Verdict.model_validate_json(answer.text)

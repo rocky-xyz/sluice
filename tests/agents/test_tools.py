@@ -82,7 +82,8 @@ def test_limits_are_cut_and_said(ctx):
 def test_price_history_ends_at_the_decision_day_and_gives_no_price_level(ctx):
     result = call(ctx, "get_price_history", json.dumps({"days": 5}))
     assert [row.day for row in result.items][-1] == DAY
-    assert result.refs[-1] == f"P:day_{DAY}" and len(result.refs) == 5
+    assert result.refs[-1] == f"P:day_{DAY:%Y%m%d}" and len(result.refs) == 5
+    assert set(cited_refs(result.content)) == set(result.refs)  # each id parses as a citation
     assert "2026-10-" not in result.content
     assert all(row.volume_ratio is not None for row in result.items)
     assert "$" not in result.content and "100." not in result.content

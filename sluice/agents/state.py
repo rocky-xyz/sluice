@@ -89,6 +89,28 @@ class FundamentalInput(BaseModel):
     visible_from: date  # the first day that quarter counted as published
 
 
+class PriceDay(BaseModel):
+    """One day of get_price_history: its return and volume ratio, never the price level."""
+
+    ref: str  # "P:day_" + the date as YYYYMMDD
+    day: date
+    ret: float  # close over the previous close, minus 1, on adjusted prices
+    volume_ratio: float | None  # volume over the average of the 20 days before; None if short
+
+
+class ToolUse(BaseModel):
+    """One tool call an analyst made (docs/specs/08-agent-harness.md, task 9.4)."""
+
+    role: str
+    step: int = Field(ge=1)  # the analyst's n-th call
+    tool: str
+    arguments: dict  # as used, after any cut to the limits
+    refs: list[str]  # what it may now cite
+    notes: list[str] = []
+    error: str | None = None
+    items: list[PriceInput | PriceDay | NewsInput | FundamentalInput] = []
+
+
 class Gap(BaseModel):
     kind: GapKind
     reason: str
@@ -162,7 +184,7 @@ def merge_reports(old: dict[str, Report] | None, new: dict[str, Report]) -> dict
 
 
 class PipelineState(TypedDict, total=False):
-    """The six channels of a run. Channels with a merge rule may be written by parallel nodes."""
+    """The channels of a run. Channels with a merge rule may be written by parallel nodes."""
 
     meta: Annotated[Meta, merge_meta]
     inputs: Inputs
@@ -170,6 +192,8 @@ class PipelineState(TypedDict, total=False):
     debate: Annotated[list[Turn], operator.add]
     decision: Decision | None
     usage: Annotated[list[Call], operator.add]
+    # Tool calls of a config with tools; absent from a prefetching run.
+    retrieved: Annotated[list[ToolUse], operator.add]
 
 
 # Every class stored in a channel; the checkpointer needs the list to read them back.
@@ -186,6 +210,8 @@ STATE_MODELS = (
     Evidence,
     Decision,
     Call,
+    PriceDay,
+    ToolUse,
 )
 
 
@@ -230,7 +256,7 @@ def malformed_citations(text: str) -> list[str]:
 
 
 def dump_state(state: PipelineState) -> dict:
-    """The full state as JSON-ready data, with every channel present."""
+    """The full state as JSON-ready data, with every channel present (`retrieved` if used)."""
     decision = state.get("decision")
     return {
         "meta": state["meta"].model_dump(mode="json"),
@@ -239,4 +265,10 @@ def dump_state(state: PipelineState) -> dict:
         "debate": [turn.model_dump(mode="json") for turn in state.get("debate", [])],
         "decision": decision.model_dump(mode="json") if decision else None,
         "usage": [call.model_dump(mode="json") for call in state.get("usage", [])],
+        # only when there is any, so a prefetching run's saved state is as it always was
+        **(
+            {"retrieved": [use.model_dump(mode="json") for use in retrieved]}
+            if (retrieved := state.get("retrieved"))
+            else {}
+        ),
     }

@@ -10,11 +10,20 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from sluice.agents import roles
+from sluice.agents import loop, roles
 from sluice.agents.config import PipelineConfig
 from sluice.agents.llm import CachedLLM
 from sluice.agents.prefetch import Weighting, prefetch
-from sluice.agents.state import STATE_MODELS, Gap, Meta, PipelineState, RunMode, make_run_id
+from sluice.agents.state import (
+    STATE_MODELS,
+    Gap,
+    Inputs,
+    Meta,
+    PipelineState,
+    RunMode,
+    make_run_id,
+)
+from sluice.agents.tools import ToolContext
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
@@ -48,6 +57,9 @@ def build_graph(
 ) -> CompiledStateGraph:
     """prefetch -> three analysts side by side -> bull/bear debate -> research manager.
 
+    With a [tools] section in the config, prefetch only notes what an ad-hoc run
+    could not bring in, and each analyst fetches its own data in a tool loop.
+
     The analysts do not depend on each other. `analysts_done` waits for all
     three, so what follows runs once and only when none of them failed. The
     debate is a loop: bull, bear, and back to bull until the configured number
@@ -72,6 +84,8 @@ def build_graph(
                 and (error := deps.fetch_statements(meta.ticker))
             ):
                 failures.append(Gap(kind="fundamentals", reason=f"fetch failed: {error}"))
+        if deps.config.tools is not None:  # the analysts fetch for themselves (task 9.4)
+            return {"inputs": Inputs(gaps=failures)}
         inputs = prefetch(
             deps.store,
             deps.prices,
@@ -83,13 +97,26 @@ def build_graph(
         )
         return {"inputs": inputs.model_copy(update={"gaps": [*failures, *inputs.gaps]})}
 
+    def with_tools(state: PipelineState, role: str) -> dict:
+        meta = state["meta"]
+        ctx = ToolContext(
+            meta.ticker, meta.decision_time, deps.store, deps.prices, deps.statements, deps.config
+        )
+        return loop.tool_analyst(state, deps.llm, deps.config, role, ctx)
+
     def market_analyst_node(state: PipelineState) -> dict:
+        if deps.config.tools is not None:
+            return with_tools(state, roles.MARKET_ANALYST)
         return roles.market_analyst(state, deps.llm, deps.config)
 
     def news_analyst_node(state: PipelineState) -> dict:
+        if deps.config.tools is not None:
+            return with_tools(state, roles.NEWS_ANALYST)
         return roles.news_analyst(state, deps.llm, deps.config)
 
     def fundamentals_analyst_node(state: PipelineState) -> dict:
+        if deps.config.tools is not None:
+            return with_tools(state, roles.FUNDAMENTALS_ANALYST)
         return roles.fundamentals_analyst(state, deps.llm, deps.config)
 
     def analysts_done_node(state: PipelineState) -> dict:

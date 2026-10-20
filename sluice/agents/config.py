@@ -47,6 +47,9 @@ class ToolsConfig(BaseModel):
     followup_calls: int = Field(default=3, ge=0)  # per analyst answering one
     history_max_days: int = Field(default=250, gt=0)  # get_price_history
     search_max_limit: int = Field(default=20, gt=0)  # items per search_news call
+    # Send the model's thinking back with its tool calls; off, since answers came back
+    # right without it in the task 9.2 check, and it costs input tokens every step.
+    pass_reasoning: bool = False
 
 
 class PipelineConfig(BaseModel):

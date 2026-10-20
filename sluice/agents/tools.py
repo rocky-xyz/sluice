@@ -21,7 +21,7 @@ import re
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -35,7 +35,7 @@ from sluice.agents.prefetch import (
     select_news,
 )
 from sluice.agents.roles import _eastern, _figure_line, _news_line, _price_line
-from sluice.agents.state import FundamentalInput, Gap, NewsInput, PriceInput
+from sluice.agents.state import FundamentalInput, Gap, NewsInput, PriceDay, PriceInput
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.market_calendar import last_closed_session
 from sluice.news.models import StoredNews
@@ -43,15 +43,12 @@ from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
 
 VOLUME_WINDOW = 20  # days behind each day's volume ratio, as for the indicator
-
-
-class PriceDay(BaseModel):
-    """One day of get_price_history: its return and volume ratio, never the price level."""
-
-    ref: str  # "P:day_" + the date
-    day: date
-    ret: float  # close over the previous close, minus 1, on adjusted prices
-    volume_ratio: float | None  # volume over the average of the 20 days before; None if short
+# Each analyst's tools (docs/specs/08, task 9.4): the split of v1's prefetched inputs.
+ROLE_TOOLS = {
+    "market_analyst": ["get_indicators", "get_price_history"],
+    "news_analyst": ["search_news"],
+    "fundamentals_analyst": ["get_fundamentals"],
+}
 
 
 Item = PriceInput | PriceDay | NewsInput | FundamentalInput
@@ -135,7 +132,7 @@ def _history(ctx: ToolContext, args: _History, notes: list[str]):
         bar = bars[i]
         rows.append(
             PriceDay(
-                ref=f"P:day_{bar.day}",
+                ref=f"P:day_{bar.day:%Y%m%d}",  # no hyphens: citations are [PFS]:\w+
                 day=bar.day,
                 ret=round(bar.close / bars[i - 1].close - 1, VALUE_DIGITS),
                 volume_ratio=round(bar.volume / average, VALUE_DIGITS) if average else None,
