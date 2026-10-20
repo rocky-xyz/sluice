@@ -14,8 +14,7 @@ DEFAULT_PATH = Path("data/local/prices.db")
 # Far enough back for 250 trading days before the first decision day of the study (2026-01).
 HISTORY_START = date(2024, 1, 1)
 
-SCHEMA_VERSION = 3
-# Nothing to migrate: prices can be fetched again at any time, so an old table is dropped.
+SCHEMA_VERSION = 4
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars (
     ticker    TEXT NOT NULL,
@@ -24,9 +23,15 @@ CREATE TABLE IF NOT EXISTS bars (
     close     REAL NOT NULL,  -- adjusted for splits and dividends
     raw_close REAL NOT NULL,  -- adjusted for splits only
     volume    REAL NOT NULL,
+    high      REAL,           -- adjusted like open; absent from bars stored before version 4
+    low       REAL,
     PRIMARY KEY (ticker, day)
 );
 """
+# Version 3 lacked high and low. They are added, not the table dropped: refetching would
+# bring adjusted prices rewritten by later dividends, changing every prompt built from
+# the stored ones, and with them the cached answers of every run so far.
+MIGRATIONS = {3: ("ALTER TABLE bars ADD COLUMN high REAL", "ALTER TABLE bars ADD COLUMN low REAL")}
 
 Fetch = Callable[[str, date], list["Bar"]]
 
@@ -39,6 +44,8 @@ class Bar(BaseModel):
     close: float  # adjusted for splits and dividends: use for returns
     raw_close: float  # adjusted for splits only: the price to value the company at
     volume: float
+    high: float | None = None  # adjusted like open (task 10.2); None for bars stored before
+    low: float | None = None
 
 
 class PriceStore:
@@ -59,7 +66,11 @@ class PriceStore:
         # Runs of a batch share this store from several threads.
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._lock = threading.RLock()
-        if self._conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version in MIGRATIONS:
+            for statement in MIGRATIONS[version]:
+                self._conn.execute(statement)
+        elif version != SCHEMA_VERSION:  # nothing worth keeping: prices can be fetched again
             self._conn.execute("DROP TABLE IF EXISTS bars")
         self._conn.executescript(_SCHEMA)
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -94,10 +105,19 @@ class PriceStore:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM bars WHERE ticker = ?", (symbol,))
             self._conn.executemany(
-                "INSERT INTO bars (ticker, day, open, close, raw_close, volume)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO bars (ticker, day, open, close, raw_close, volume, high, low)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (symbol, bar.day.isoformat(), bar.open, bar.close, bar.raw_close, bar.volume)
+                    (
+                        symbol,
+                        bar.day.isoformat(),
+                        bar.open,
+                        bar.close,
+                        bar.raw_close,
+                        bar.volume,
+                        bar.high,
+                        bar.low,
+                    )
                     for bar in bars
                 ],
             )
@@ -114,19 +134,25 @@ class PriceStore:
             if self._fetch is not None and (latest is None or latest < through):
                 now = self._now()
                 fetched = self._fetch(canonical(ticker), self._history_start)
-                finished = [
-                    bar for bar in fetched if (close := close_of(bar.day)) and close <= now
-                ]
+                finished = [bar for bar in fetched if (close := close_of(bar.day)) and close <= now]
                 if finished:
                     self.replace(ticker, finished)
             rows = self._conn.execute(
-                "SELECT day, open, close, raw_close, volume FROM bars WHERE ticker = ? AND day <= ?"
-                " ORDER BY day DESC LIMIT ?",
+                "SELECT day, open, close, raw_close, volume, high, low FROM bars"
+                " WHERE ticker = ? AND day <= ? ORDER BY day DESC LIMIT ?",
                 (canonical(ticker), through.isoformat(), limit),
             ).fetchall()
             return [
-                Bar(day=day, open=open_, close=close, raw_close=raw, volume=volume)
-                for day, open_, close, raw, volume in reversed(rows)
+                Bar(
+                    day=day,
+                    open=open_,
+                    close=close,
+                    raw_close=raw,
+                    volume=volume,
+                    high=high,
+                    low=low,
+                )
+                for day, open_, close, raw, volume, high, low in reversed(rows)
             ]
 
     def get(self, ticker: str, day: date) -> Bar | None:

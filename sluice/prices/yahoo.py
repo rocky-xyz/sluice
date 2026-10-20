@@ -23,20 +23,25 @@ def fetch_bars(ticker: str, start: date) -> list[Bar]:
             if "404" in str(exc):
                 return []
             raise
-        return [
-            Bar(
-                day=stamp.date(),
-                # Yahoo gives no "Adj Open"; apply the same day's split+dividend
-                # adjustment ratio (Adj Close / Close) that `close` already carries.
-                open=float(row["Open"]) * float(row["Adj Close"]) / float(row["Close"]),
-                close=float(row["Adj Close"]),
-                raw_close=float(row["Close"]),
-                volume=float(row["Volume"]),
+        bars = []
+        for stamp, row in frame.iterrows():
+            if any(math.isnan(row[c]) for c in ("Open", "Adj Close", "Close", "Volume")):
+                continue
+            # Yahoo gives no adjusted open, high or low; apply the same day's split+dividend
+            # adjustment ratio (Adj Close / Close) that `close` already carries.
+            ratio = float(row["Adj Close"]) / float(row["Close"])
+            high, low = float(row["High"]), float(row["Low"])
+            bars.append(
+                Bar(
+                    day=stamp.date(),
+                    open=float(row["Open"]) * ratio,
+                    close=float(row["Adj Close"]),
+                    raw_close=float(row["Close"]),
+                    volume=float(row["Volume"]),
+                    high=None if math.isnan(high) else high * ratio,
+                    low=None if math.isnan(low) else low * ratio,
+                )
             )
-            for stamp, row in frame.iterrows()
-            if not any(
-                math.isnan(row[column]) for column in ("Open", "Adj Close", "Close", "Volume")
-            )
-        ]
+        return bars
 
     return _retry(call)

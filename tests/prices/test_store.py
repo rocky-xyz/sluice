@@ -80,3 +80,34 @@ def test_a_vendor_failure_is_raised_not_read_as_no_prices(tmp_path):
 def test_without_a_vendor_only_stored_bars_are_read(tmp_path):
     with store(tmp_path) as prices:
         assert prices.history("NVDA", LAST, limit=250) == []
+
+
+def test_a_version_3_store_gains_high_and_low_and_keeps_every_bar(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE bars (ticker TEXT NOT NULL, day TEXT NOT NULL, open REAL NOT NULL,"
+        " close REAL NOT NULL, raw_close REAL NOT NULL, volume REAL NOT NULL,"
+        " PRIMARY KEY (ticker, day));"
+        "INSERT INTO bars VALUES ('NVDA', '2026-09-30', 100.0, 101.5, 102.0, 1000000);"
+        "PRAGMA user_version = 3;"
+    )
+    old.commit()
+    old.close()
+    with PriceStore(path) as store:
+        (bar,) = store.history("NVDA", date(2026, 9, 30), 5)
+    assert (bar.open, bar.close, bar.raw_close, bar.volume) == (100.0, 101.5, 102.0, 1000000)
+    assert (bar.high, bar.low) == (None, None)  # not refetched: the stored prices stay as they were
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_high_and_low_are_stored_and_read_back(tmp_path):
+    from sluice.prices.store import Bar
+
+    with PriceStore(tmp_path / "p.db") as store:
+        store.replace("NVDA", [Bar(day=date(2026, 9, 30), open=100, close=101, raw_close=101,
+                                   volume=5, high=103.5, low=99.25)])  # fmt: skip
+        (bar,) = store.history("NVDA", date(2026, 9, 30), 1)
+    assert (bar.high, bar.low) == (103.5, 99.25)
