@@ -334,3 +334,15 @@ def test_no_follow_ups_without_rounds_or_without_tools(stocked, tmp_path):
     run(pipeline(stocked, tmp_path / "v1", v1), CONFIG, "NVDA", CLOSE)
     prompt = v1.asked("research_manager")[0].messages[1].content
     assert "you may send" not in prompt and "No more questions" not in prompt
+
+
+def test_the_shipped_v3_uses_tools_and_keeps_v1s_debate_prompts():
+    from sluice.agents.config import load_config
+
+    v1, v3 = load_config("v1"), load_config("v3")
+    assert v3.tools == ToolsConfig(max_calls=6, followup_rounds=1, followup_calls=3)
+    assert (v1.digest, v1.tools) == ("97b47162", None)
+    assert v3.models == v1.models and v3.debate_rounds == v1.debate_rounds
+    assert v3.prompts["bull"] == v1.prompts["bull"] and v3.prompts["bear"] == v1.prompts["bear"]
+    for role in ("market_analyst", "news_analyst", "fundamentals_analyst"):
+        assert "limited number of tool calls" in v3.prompts[role]
