@@ -52,6 +52,7 @@ class PriceStore:
         path: str | Path = DEFAULT_PATH,
         fetch: Fetch | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        history_start: date = HISTORY_START,  # how far back a fetch goes (the pattern study: 10 years)
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +66,7 @@ class PriceStore:
         self._conn.commit()
         self._fetch = fetch
         self._now = now
+        self._history_start = history_start
 
     def close(self) -> None:
         self._conn.close()
@@ -111,7 +113,7 @@ class PriceStore:
             latest = self.latest(ticker)
             if self._fetch is not None and (latest is None or latest < through):
                 now = self._now()
-                fetched = self._fetch(canonical(ticker), HISTORY_START)
+                fetched = self._fetch(canonical(ticker), self._history_start)
                 finished = [
                     bar for bar in fetched if (close := close_of(bar.day)) and close <= now
                 ]

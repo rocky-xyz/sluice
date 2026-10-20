@@ -20,6 +20,8 @@ calibration_app = typer.Typer(help="Hand-labeling Jev's scores against a sample.
 app.add_typer(calibration_app, name="calibration")
 evolve_app = typer.Typer(help="The evolution loop over sizing configs.", no_args_is_help=True)
 app.add_typer(evolve_app, name="evolve")
+patterns_app = typer.Typer(help="Candlestick patterns and their study.", no_args_is_help=True)
+app.add_typer(patterns_app, name="patterns")
 
 
 def _version(value: bool) -> None:
@@ -1567,3 +1569,72 @@ def evolve_propose_pipeline(
         f"run it:   sluice evolve screen --proposal {saved} --yes",
         markup=False,
     )
+
+
+UNIVERSE_OPTION = typer.Option("--universe", help="A list under configs/universe/.")
+
+
+@patterns_app.command("universe")
+def patterns_universe(
+    name: Annotated[str, UNIVERSE_OPTION] = "sp500-2026-10",
+) -> None:
+    """Read today's S&P 500 from Wikipedia once and keep it as a fixed list."""
+    from datetime import UTC, datetime
+
+    from sluice.patterns import universe
+
+    path = universe.ROOT / f"{name}.txt"
+    if path.exists():
+        typer.echo(f"{path} exists; a new list is a new name.", err=True)
+        raise typer.Exit(code=2)
+    try:
+        symbols = universe.fetch()
+    except Exception as exc:
+        typer.echo(f"could not read the list: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    saved = universe.save(symbols, name, datetime.now(UTC).date())
+    typer.echo(f"{len(symbols)} symbols written to {saved}")
+
+
+@patterns_app.command("fetch")
+def patterns_fetch(
+    name: Annotated[str, UNIVERSE_OPTION] = "sp500-2026-10",
+    start: Annotated[
+        str, typer.Option("--from", help="How far back a new series goes (YYYY-MM-DD).")
+    ] = "2016-01-01",
+    db: Annotated[Path, typer.Option("--db", help="The pattern study's price store.")] = Path(
+        "data/local/patterns/prices.db"
+    ),
+) -> None:
+    """Daily bars for every listed stock and SPY. Rerun to update; finished ones are skipped."""
+    from datetime import UTC, date, datetime
+
+    from rich.progress import Progress
+
+    from sluice.market_calendar import last_closed_session
+    from sluice.patterns import universe
+    from sluice.patterns.prices import fetch_all
+    from sluice.prices.store import PriceStore
+    from sluice.prices.yahoo import fetch_bars
+
+    symbols = universe.load(name)
+    through = last_closed_session(datetime.now(UTC))
+    console = Console()
+    with (
+        PriceStore(db, fetch=fetch_bars, history_start=date.fromisoformat(start)) as store,
+        Progress(console=console) as bar,
+    ):
+        task = bar.add_task(f"{name} through {through}", total=len(symbols) + 1)
+        result = fetch_all(store, symbols, through, on_step=lambda _: bar.advance(task))
+    console.print(
+        f"up to date {result.current}, fetched {result.fetched}, "
+        f"no bars {len(result.empty)}, failed {len(result.failed)}",
+        markup=False,
+    )
+    for symbol in result.empty:
+        console.print(f"  no bars: {symbol}", markup=False)
+    for symbol, why in result.failed.items():
+        console.print(f"  failed: {symbol}: {why}", markup=False)
+    if result.failed:
+        typer.echo("Some failed; run again to retry them.", err=True)
+        raise typer.Exit(code=1)

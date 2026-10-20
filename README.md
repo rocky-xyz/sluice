@@ -128,6 +128,8 @@ sluice evolve screen --prompt news_analyst=new.txt   # the same for one role's w
 sluice evolve full --set tools.max_calls=4 --yes     # full validation run of a screened change
 sluice evolve pipeline-status                        # pipeline champion, screens and full evaluations left
 sluice evolve propose-pipeline                       # ask the LLM for one pipeline change; screen it with --proposal
+sluice patterns universe                 # read today's S&P 500 once into configs/universe/ (pattern study)
+sluice patterns fetch                    # ten years of daily bars for it, in a store of its own (resumable)
 ```
 
 `news collect` adds new items to `data/news.db` and archives the raw vendor
