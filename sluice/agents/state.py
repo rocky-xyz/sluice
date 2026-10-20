@@ -3,7 +3,7 @@ import re
 from datetime import date, datetime
 from typing import Annotated, Literal, TypedDict
 
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from sluice.news.models import Session
 from sluice.news.signal import Record
@@ -103,6 +103,7 @@ class ToolUse(BaseModel):
 
     role: str
     step: int = Field(ge=1)  # the analyst's n-th call
+    round: int = Field(default=0, ge=0)  # 0: writing the report; n: answering follow-up round n
     tool: str
     arguments: dict  # as used, after any cut to the limits
     refs: list[str]  # what it may now cite
@@ -158,6 +159,39 @@ class Verdict(BaseModel):
     rationale: str = Field(min_length=1)
 
 
+Channel = Literal["market", "news", "fundamentals"]  # an analyst, by its report's key
+
+
+class Question(BaseModel):
+    """A follow-up the research manager sends one analyst (task 9.5)."""
+
+    analyst: Channel
+    question: str = Field(min_length=1, max_length=500)
+
+
+class ManagerAnswer(Verdict):
+    """The manager's answer while it may still ask: a preliminary view plus any questions."""
+
+    followups: list[Question] = Field(default=[], max_length=3)
+
+    @model_validator(mode="after")
+    def _one_each(self) -> "ManagerAnswer":
+        asked = [q.analyst for q in self.followups]
+        if len(asked) != len(set(asked)):
+            raise ValueError("at most one question per analyst")
+        return self
+
+
+class FollowUp(BaseModel):
+    """A question and the analyst's addendum; `answered` is False when it could not answer."""
+
+    round: int = Field(ge=1)
+    analyst: Channel
+    question: str
+    answer: str
+    answered: bool = True
+
+
 class Decision(Verdict):
     notes: list[str] = []  # added by code: coverage gaps, out-of-universe ticker
 
@@ -194,6 +228,11 @@ class PipelineState(TypedDict, total=False):
     usage: Annotated[list[Call], operator.add]
     # Tool calls of a config with tools; absent from a prefetching run.
     retrieved: Annotated[list[ToolUse], operator.add]
+    # The research manager's follow-ups (task 9.5): asked and not yet answered, then answered,
+    # and its preliminary view from before the answers.
+    pending: list[Question]
+    followups: Annotated[list[FollowUp], operator.add]
+    preliminary: Verdict | None
 
 
 # Every class stored in a channel; the checkpointer needs the list to read them back.
@@ -212,6 +251,9 @@ STATE_MODELS = (
     Call,
     PriceDay,
     ToolUse,
+    Verdict,
+    Question,
+    FollowUp,
 )
 
 
@@ -269,6 +311,16 @@ def dump_state(state: PipelineState) -> dict:
         **(
             {"retrieved": [use.model_dump(mode="json") for use in retrieved]}
             if (retrieved := state.get("retrieved"))
+            else {}
+        ),
+        **(
+            {"followups": [f.model_dump(mode="json") for f in followups]}
+            if (followups := state.get("followups"))
+            else {}
+        ),
+        **(
+            {"preliminary": preliminary.model_dump(mode="json")}
+            if (preliminary := state.get("preliminary"))
             else {}
         ),
     }

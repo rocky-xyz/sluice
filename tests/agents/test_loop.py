@@ -13,7 +13,15 @@ from sluice.agents.tools import ToolContext
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
-from tests.agents.test_pipeline import CLOSE, CONFIG, ROLE_OF_PROMPT, article, pipeline, verdict
+from tests.agents.test_pipeline import (
+    CLOSE,
+    CONFIG,
+    ROLE_OF_PROMPT,
+    FakeModel,
+    article,
+    pipeline,
+    verdict,
+)
 
 TOOLED = CONFIG.model_copy(update={"tools": ToolsConfig()})
 
@@ -209,3 +217,120 @@ def test_thinking_is_sent_back_only_when_the_rules_say_so(stocked, tmp_path, fla
     go(pipeline(stocked, tmp_path, model, config=config), config)
     turn = model.asked("market_analyst")[1].messages[2]
     assert turn.reasoning_content == ("I should look at momentum." if flag else None)
+
+
+# --- follow-up questions (task 9.5) ---
+
+
+def manager_asking(*questions: tuple[str, str], again: bool = False):
+    """A manager that asks once, then decides citing what it may; or asks every time."""
+
+    def answer(request):
+        prompt = request.messages[1].content
+        cited = sorted(cited_refs(prompt))
+        draft = json.loads(verdict(cited[0]))
+        if "No more questions can be asked" in prompt and not again:
+            return say(verdict(*cited[-1:], rating="hold"))
+        if questions and "you may send each analyst" in prompt or again:
+            draft["followups"] = [{"analyst": a, "question": q} for a, q in questions]
+        return say(json.dumps(draft))
+
+    return answer
+
+
+def news_answering(request):
+    text = request.messages[1].content
+    if "The research manager asks" in text and not tool_results(request):
+        return ask(("search_news", {"query": "headline", "days": 3}))
+    if "The research manager asks" in text:
+        return say(f"Checked again [{returned(request)[-1]}].")
+    if not tool_results(request):
+        return ask(("search_news", {"query": "chipmaker"}))
+    return say(f"Seen [{returned(request)[0]}].")
+
+
+def test_the_manager_asks_an_analyst_answers_with_its_tools_and_the_manager_decides(
+    stocked, tmp_path
+):
+    model = Agents(
+        research_manager=manager_asking(("news", "Is the latest story confirmed?")),
+        news_analyst=news_answering,
+    )
+    state = go(pipeline(stocked, tmp_path, model, config=TOOLED))
+    assert state["meta"].status == "ok"
+    first, second = model.asked("research_manager")
+    assert "you may send each analyst at most one question" in first.messages[1].content
+    assert "at most 3 more calls each" in first.messages[1].content
+    assert "## follow-up, round 1, news analyst" in second.messages[1].content
+    assert "No more questions can be asked" in second.messages[1].content
+    (followup,) = state["followups"]
+    assert (followup.round, followup.analyst, followup.answered) == (1, "news", True)
+    asked = [
+        r for r in model.asked("news_analyst") if "research manager asks" in r.messages[1].content
+    ]
+    assert "Is the latest story confirmed?" in asked[0].messages[1].content
+    assert "Your report:\nSeen [" in asked[0].messages[1].content
+    assert [s.name for s in asked[0].tools] == ["search_news"]
+    extra = [u for u in state["retrieved"] if u.round == 1]
+    assert [(u.role, u.step) for u in extra] == [("news_analyst", 2)]
+    # the preliminary view is kept; the decision comes after the answer
+    assert state["preliminary"].rating == "overweight" and state["decision"].rating == "hold"
+    saved = dump_state(state)
+    assert saved["followups"][0]["question"] == "Is the latest story confirmed?"
+    assert saved["preliminary"]["rating"] == "overweight"
+
+
+def test_without_questions_the_manager_decides_at_once(stocked, tmp_path):
+    model = Agents(research_manager=manager_asking())
+    state = go(pipeline(stocked, tmp_path, model, config=TOOLED))
+    assert len(model.asked("research_manager")) == 1
+    assert "followups" not in dump_state(state) and state["decision"] is not None
+
+
+def test_a_second_round_of_questions_is_refused(stocked, tmp_path):
+    asks_forever = manager_asking(("news", "And now?"), again=True)
+    model = Agents(research_manager=asks_forever, news_analyst=news_answering)
+    state = go(pipeline(stocked, tmp_path, model, config=TOOLED))
+    assert state["meta"].status == "failed"
+    assert "no more follow-up questions can be asked" in state["meta"].failure
+    assert len(state["followups"]) == 1
+
+
+def test_an_unanswerable_question_is_noted_and_the_run_goes_on(stocked, tmp_path):
+    def mute(request):
+        if "The research manager asks" in request.messages[1].content:
+            return say("I cannot tell.")  # never cites anything
+        return news_answering(request)
+
+    model = Agents(research_manager=manager_asking(("news", "Why?")), news_analyst=mute)
+    state = go(pipeline(stocked, tmp_path, model, config=TOOLED))
+    (followup,) = state["followups"]
+    assert not followup.answered and followup.answer.startswith("The analyst could not answer")
+    assert state["meta"].status == "ok" and state["decision"] is not None
+    second = model.asked("research_manager")[1].messages[1].content
+    assert "news analyst (not answered)" in second
+
+
+def test_two_questions_to_one_analyst_are_asked_again(stocked, tmp_path):
+    def twice(request):
+        draft = json.loads(verdict(min(cited_refs(request.messages[1].content))))
+        draft["followups"] = [
+            {"analyst": "news", "question": "A?"},
+            {"analyst": "news", "question": "B?"},
+        ]
+        return say(json.dumps(draft))
+
+    model = Agents(research_manager=twice)
+    state = go(pipeline(stocked, tmp_path, model, config=TOOLED))
+    assert state["meta"].status == "failed" and "one question per analyst" in state["meta"].failure
+
+
+def test_no_follow_ups_without_rounds_or_without_tools(stocked, tmp_path):
+    config = CONFIG.model_copy(update={"tools": ToolsConfig(followup_rounds=0)})
+    model = Agents(research_manager=manager_asking())
+    go(pipeline(stocked, tmp_path, model, config=config), config)
+    assert "you may send" not in model.asked("research_manager")[0].messages[1].content
+    v1 = FakeModel()  # prefetching analysts, as in test_pipeline
+    run(pipeline(stocked, tmp_path / "v1", v1), CONFIG, "NVDA", CLOSE)
+    prompt = v1.asked("research_manager")[0].messages[1].content
+    assert "you may send" not in prompt and "No more questions" not in prompt

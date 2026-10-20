@@ -30,6 +30,7 @@ from sluice.prices.store import PriceStore
 from sluice.universe import canonical
 
 DEFAULT_CHECKPOINTS = Path("data/local/checkpoints.db")
+FOLLOWUP = "followup"  # the analysts answering the research manager's questions (task 9.5)
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,8 @@ def build_graph(
     """prefetch -> three analysts side by side -> bull/bear debate -> research manager.
 
     With a [tools] section in the config, prefetch only notes what an ad-hoc run
-    could not bring in, and each analyst fetches its own data in a tool loop.
+    could not bring in, each analyst fetches its own data in a tool loop, and the
+    manager may send questions back once before deciding.
 
     The analysts do not depend on each other. `analysts_done` waits for all
     three, so what follows runs once and only when none of them failed. The
@@ -98,11 +100,7 @@ def build_graph(
         return {"inputs": inputs.model_copy(update={"gaps": [*failures, *inputs.gaps]})}
 
     def with_tools(state: PipelineState, role: str) -> dict:
-        meta = state["meta"]
-        ctx = ToolContext(
-            meta.ticker, meta.decision_time, deps.store, deps.prices, deps.statements, deps.config
-        )
-        return loop.tool_analyst(state, deps.llm, deps.config, role, ctx)
+        return loop.tool_analyst(state, deps.llm, deps.config, role, context(state))
 
     def market_analyst_node(state: PipelineState) -> dict:
         if deps.config.tools is not None:
@@ -130,6 +128,20 @@ def build_graph(
 
     def research_manager_node(state: PipelineState) -> dict:
         return roles.research_manager(state, deps.llm, deps.config)
+
+    def context(state: PipelineState) -> ToolContext:
+        meta = state["meta"]
+        return ToolContext(
+            meta.ticker, meta.decision_time, deps.store, deps.prices, deps.statements, deps.config
+        )
+
+    def followup_node(state: PipelineState) -> dict:
+        return loop.answer_followups(state, deps.llm, deps.config, lambda: context(state))
+
+    def after_manager(state: PipelineState) -> str:
+        if state["meta"].status == "failed" or not state.get("pending"):
+            return END
+        return FOLLOWUP
 
     def after_analysts(state: PipelineState) -> str:
         if state["meta"].status == "failed":
@@ -169,7 +181,9 @@ def build_graph(
     )
     graph.add_conditional_edges(roles.BULL, after_bull, [roles.BEAR, END])
     graph.add_conditional_edges(roles.BEAR, after_bear, [roles.BULL, roles.RESEARCH_MANAGER, END])
-    graph.add_edge(roles.RESEARCH_MANAGER, END)
+    graph.add_node(FOLLOWUP, followup_node)
+    graph.add_conditional_edges(roles.RESEARCH_MANAGER, after_manager, [FOLLOWUP, END])
+    graph.add_edge(FOLLOWUP, roles.RESEARCH_MANAGER)
     return graph.compile(checkpointer=checkpointer)
 
 

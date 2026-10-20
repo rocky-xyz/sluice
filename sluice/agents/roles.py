@@ -5,8 +5,10 @@ from sluice.agents.llm import CachedLLM, LLMError, LLMRequest, LLMResponse, Mess
 from sluice.agents.state import (
     Call,
     Decision,
+    FollowUp,
     FundamentalInput,
     Inputs,
+    ManagerAnswer,
     Meta,
     NewsInput,
     PipelineState,
@@ -240,26 +242,63 @@ def has_data(reports: dict[str, Report]) -> bool:
 
 
 def citable_refs(
-    inputs: Inputs, reports: dict[str, Report], retrieved: list[ToolUse] | None = None
+    inputs: Inputs,
+    reports: dict[str, Report],
+    retrieved: list[ToolUse] | None = None,
+    followups: list[FollowUp] | None = None,
 ) -> set[str]:
-    """What roles after the analysts may cite: ids that a report cites.
+    """What roles after the analysts may cite: ids that a report or an addendum cites.
 
     Reports were checked against the inputs, or against what the analysts' tools
-    returned (task 9.4), so these all exist there.
+    returned (tasks 9.4, 9.5), so these all exist there.
     """
     known = inputs.refs() | {ref for use in retrieved or [] for ref in use.refs}
-    return set().union(*(cited_refs(r.text) for r in reports.values())) & known
+    texts = [r.text for r in reports.values()] + [f.answer for f in followups or [] if f.answered]
+    return set().union(*(cited_refs(text) for text in texts)) & known
 
 
-def reports_prompt(meta: Meta, reports: dict[str, Report], debate: list[Turn]) -> str:
-    """Reports and debate turns only: nobody after the analysts sees the pre-fetched inputs."""
+def reports_prompt(
+    meta: Meta,
+    reports: dict[str, Report],
+    debate: list[Turn],
+    followups: list[FollowUp] | None = None,
+) -> str:
+    """Reports, debate turns and follow-ups: nobody after the analysts sees their sources."""
     parts = [_header(meta)]
     for name, report in sorted(reports.items()):
         marker = " (no data)" if report.no_data else ""
         parts.append(f"## {name} report{marker}\n{report.text}")
     for turn in debate:
         parts.append(f"## debate, round {turn.round}, {turn.side}\n{turn.text}")
+    for f in followups or []:
+        marker = "" if f.answered else " (not answered)"
+        parts.append(
+            f"## follow-up, round {f.round}, {f.analyst} analyst{marker}\n"
+            f"Question: {f.question}\nAnswer: {f.answer}"
+        )
     return "\n\n".join(parts)
+
+
+# Appended by code to the research manager's prompt in a config with tools (task 9.5), so
+# that the format stays with the check and only code needs to know the rounds left.
+FOLLOWUPS_OPEN = """
+
+Before deciding, you may send each analyst at most one question, which they answer with \
+their tools (at most {calls} more calls each), when a specific gap could change your rating. \
+To ask, add to your JSON object:
+  "followups": [{{"analyst": "market" | "news" | "fundamentals", "question": "one question"}}]
+Your rating, evidence and rationale are then kept as a preliminary view, and you decide again \
+after reading the answers. Leave "followups" out when the reports are enough."""
+FOLLOWUPS_CLOSED = """
+
+No more questions can be asked: give your final decision, without "followups"."""
+
+
+def followup_rounds_left(state: PipelineState, config: PipelineConfig) -> int:
+    if config.tools is None:
+        return 0
+    done = max((f.round for f in state.get("followups", [])), default=0)
+    return max(0, config.tools.followup_rounds - done)
 
 
 def debater(state: PipelineState, llm: CachedLLM, config: PipelineConfig, side: Side) -> dict:
@@ -289,31 +328,45 @@ def debater(state: PipelineState, llm: CachedLLM, config: PipelineConfig, side: 
 
 
 def research_manager(state: PipelineState, llm: CachedLLM, config: PipelineConfig) -> dict:
-    """Reads the reports, gives the rating. Its evidence may only cite what the reports cite."""
+    """Reads the reports, gives the rating. Its evidence may only cite what the reports cite.
+
+    In a config with tools it may first ask the analysts follow-up questions
+    (task 9.5): its answer is then kept as `preliminary` and the questions as
+    `pending`, and it is asked again once they are answered.
+    """
     meta, inputs, reports = state["meta"], state["inputs"], state["reports"]
     if not has_data(reports):
         failure = f"{RESEARCH_MANAGER}: no report has any data"
         return {"meta": meta.model_copy(update={"status": "failed", "failure": failure})}
 
-    citable = citable_refs(inputs, reports, state.get("retrieved"))
+    followups = state.get("followups", [])
+    citable = citable_refs(inputs, reports, state.get("retrieved"), followups)
+    may_ask = followup_rounds_left(state, config) > 0
 
-    def check(answer: LLMResponse) -> Verdict:
-        verdict = Verdict.model_validate_json(answer.text)
+    def check(answer: LLMResponse) -> ManagerAnswer:
+        verdict = ManagerAnswer.model_validate_json(answer.text)
         used = {ref for evidence in verdict.evidence for ref in evidence.refs}
         if unknown := sorted(used - citable):
             raise ValueError(f"the evidence cites ids that are not in the reports: {unknown}")
+        if verdict.followups and not may_ask:
+            raise ValueError("no more follow-up questions can be asked; decide now")
         return verdict
 
-    prompt = reports_prompt(meta, reports, state.get("debate", []))
+    prompt = reports_prompt(meta, reports, state.get("debate", []), followups)
+    if may_ask:
+        prompt += FOLLOWUPS_OPEN.format(calls=config.tools.followup_calls)
+    elif followups:
+        prompt += FOLLOWUPS_CLOSED
     request = _request(config, RESEARCH_MANAGER, prompt, json_mode=True)
     try:
-        verdict, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
+        answer, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
     except LLMError as error:
         return _failed(meta, RESEARCH_MANAGER, error, request.model)
+    usage = _calls(RESEARCH_MANAGER, request.model, answers)
+    verdict = Verdict(**answer.model_dump(exclude={"followups"}))
+    if answer.followups:  # a preliminary view; the analysts answer, then it decides again
+        return {"pending": answer.followups, "preliminary": verdict, "usage": usage}
     notes = [f"Gap in {gap.kind}: {gap.reason}." for gap in inputs.gaps]
     if meta.mode == "adhoc" and meta.ticker not in UNIVERSE:
         notes.append(OUTSIDE_UNIVERSE)
-    return {
-        "decision": Decision(**verdict.model_dump(), notes=notes),
-        "usage": _calls(RESEARCH_MANAGER, request.model, answers),
-    }
+    return {"decision": Decision(**verdict.model_dump(), notes=notes), "usage": usage}
