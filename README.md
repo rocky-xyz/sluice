@@ -99,14 +99,17 @@ scripts/  tests/
 
 ## Install
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/rocky-xyz/sluice.git
 cd sluice
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync            # creates .venv from uv.lock, including the dev tools
 ```
+
+Run commands with `uv run` (for example `uv run sluice --version`), or
+activate the environment once with `source .venv/bin/activate`; the examples
+below assume it is active.
 
 ## Usage
 
@@ -219,8 +222,8 @@ API keys are read from the environment or from a local `.env` file; see
 ## Development
 
 ```bash
-ruff check .
-pytest -q          # tests marked `integration` are skipped by default
+uv run ruff check .
+uv run pytest -q   # tests marked `integration` are skipped by default
 ```
 
 ## Roadmap

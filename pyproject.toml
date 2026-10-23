@@ -23,14 +23,14 @@ dependencies = [
     "yfinance>=1.7",
 ]
 
-[project.optional-dependencies]
+[project.scripts]
+sluice = "sluice.cli:app"
+
+[dependency-groups]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
-
-[project.scripts]
-sluice = "sluice.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sluice"]
