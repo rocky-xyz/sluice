@@ -1,4 +1,5 @@
 import time
+import warnings
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ RETRY_DELAYS = (2.0, 4.0, 8.0)  # seconds; rate limits only
 
 # yfinance turns some failed requests into an empty result; make them raise instead.
 yf.config.debug.hide_exceptions = False
+# yfinance shows its own deprecation warnings, set on import; those from its use of pandas 3 are not ours to fix.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"yfinance\.")
 
 
 def _retry(call: Callable[[], list], sleep: Callable[[float], None] = time.sleep) -> list:
