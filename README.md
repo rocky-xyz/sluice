@@ -34,39 +34,20 @@ The goal is rigour, not a claim of profitability.
 
 ## Architecture
 
-```
-data (yfinance,        ->  news store: timestamp, source, ticker, text      [cached]
- Finnhub)
-        |
-scoring                per-item scores: relevance, stance, novelty, rumour,
-                       event type + code features (source, time of day,
-                       duplicate count)                                     [cached]
-        |
-aggregation            learned weights by source x type x regime
-                       -> weighted news signal
-        |
-agents                 multi-agent graph: market, news and fundamentals
-                       analysts, a bull/bear debate, a research manager.
-                       v1/v2: data prefetched by code; v3: analysts fetch it
-                       themselves through point-in-time tools, and the manager
-                       may send them one round of follow-up questions       [cached]
-        |
-sizing                 regime (computed in code) + scored analyst stances
-(pure Python)          -> target position -> volatility scaling -> caps
-        |
-evaluation (frozen)    portfolio walk-forward backtest, baselines, hit rate,
-                       calibration, consistency across repeated runs
-        ^
-evolution              proposer (LLM) reads failures -> config diff -> gate
-                       accepts only if validation gain > noise -> versioned
-                       config store. Two layers: sizing parameters (one gate),
-                       pipeline rules and prompts (a cheap screen, then a full
-                       evaluation)
+![sluice architecture: sources, point-in-time data, the LangGraph agent pipeline, code-only sizing, backtest and guarded evolution](assets/Frame.png)
 
-patterns (side study)  candlestick rules on ten years of S&P 500 bars -> event
-                       study against a baseline -> a get_patterns tool, built
-                       but not offered to the analysts
-```
+Not shown in the diagram:
+
+- **Pipeline versions.** v1 (shown) gets its data prefetched by code. v2 also
+  filters news by Jev relevance and gives the news analyst each source's track
+  record and the news signal. v3 lets the analysts fetch data themselves through
+  point-in-time tools, and the manager may send them one round of follow-up
+  questions.
+- **Two evolution layers.** Sizing parameters pass one gate; pipeline rules and
+  prompts pass a cheap screen, then a full evaluation.
+- **Patterns (side study).** Candlestick rules on ten years of S&P 500 bars,
+  tested against a baseline; a `get_patterns` tool is built but not offered to
+  the analysts.
 
 ## Design rules
 
