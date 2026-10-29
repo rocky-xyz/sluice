@@ -2,7 +2,7 @@
 
 A multi-agent equity research pipeline that scores every news item, learns how
 much each source and event type should count, and turns the result into
-position sizes with code2.
+position sizes with code rather than with an LLM.
 
 This is a research and decision-support tool. It does not place orders, and
 nothing here is financial advice.
