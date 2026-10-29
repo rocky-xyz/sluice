@@ -47,6 +47,16 @@ PRICE_LABELS = {
     "vs_sma200": "last close relative to its 200-day average",
     "rsi_14": "14-day RSI (0 to 100)",
     "volume_ratio_20d": "last day's volume relative to the average of the 20 days before",
+    "macd_hist_pct": "MACD histogram (12, 26, 9) relative to the last close",
+    "bb_pctb_20": "where the last close sits in the 20-day Bollinger band "
+    "(0 lower band, 1 upper band)",
+    "bb_width_20": "width of the 20-day Bollinger band relative to its middle line",
+    "atr_14_pct": "14-day average true range relative to the last close",
+    "vs_ema10": "last close relative to its 10-day exponential average",
+    "range_250d": "where the last close sits between the lowest low and the highest high "
+    "of the last 250 trading days (0 lowest, 1 highest)",
+    "kdj_k": "KDJ K line (9, 3, 3; 0 to 100)",
+    "kdj_d": "KDJ D line (9, 3, 3; 0 to 100)",
 }
 FIGURE_LABELS = {
     "revenue": "revenue",
@@ -142,12 +152,14 @@ def _analyst(
 
 
 def _price_line(item: PriceInput) -> str:
-    if item.name.startswith("rsi_"):
+    if item.name.startswith(("rsi_", "kdj_")):
         shown = f"{item.value:.1f}"
     elif item.name.startswith("volume_ratio_"):
         shown = f"{item.value:.2f}x"
-    elif item.name.startswith("vol_"):
+    elif item.name.startswith(("vol_", "bb_width_", "atr_")):
         shown = f"{item.value:.2%}"
+    elif item.name.startswith(("bb_pctb_", "range_")):
+        shown = f"{item.value:.2f}"
     else:
         shown = f"{item.value:+.2%}"
     return f"[{item.ref}] {PRICE_LABELS.get(item.name, item.name)}: {shown}"
