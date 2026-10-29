@@ -56,14 +56,15 @@ class Deps:
 def build_graph(
     deps: Deps, checkpointer: BaseCheckpointSaver | None = None
 ) -> CompiledStateGraph:
-    """prefetch -> three analysts side by side -> bull/bear debate -> research manager.
+    """prefetch -> the chosen analysts side by side -> bull/bear debate -> research manager.
 
     With a [tools] section in the config, prefetch only notes what an ad-hoc run
     could not bring in, each analyst fetches its own data in a tool loop, and the
     manager may send questions back once before deciding.
 
     The analysts do not depend on each other. `analysts_done` waits for all
-    three, so what follows runs once and only when none of them failed. The
+    of them, so what follows runs once and only when none of them failed. A
+    config picks which analysts run (task 11.4); by default all three do. The
     debate is a loop: bull, bear, and back to bull until the configured number
     of rounds is done. Any role that fails ends the run. The manager validates
     its own answer, because a rejected answer has to be asked again and the
@@ -73,15 +74,21 @@ def build_graph(
     before pre-fetching: it brings its ticker's news and statements up to date.
     """
     rounds = deps.config.debate_rounds
+    chosen = deps.config.selected_analysts
 
     def prefetch_node(state: PipelineState) -> dict:
         meta = state["meta"]
         failures = []
-        if meta.mode == "adhoc":
-            if deps.collect_news and (error := deps.collect_news(meta.ticker)):
+        if meta.mode == "adhoc":  # only for the analysts that run: nothing else would read it
+            if (
+                "news" in chosen
+                and deps.collect_news
+                and (error := deps.collect_news(meta.ticker))
+            ):
                 failures.append(Gap(kind="news", reason=f"live collection failed: {error}"))
             if (
-                deps.fetch_statements
+                "fundamentals" in chosen
+                and deps.fetch_statements
                 and deps.statements.quarters(meta.ticker) is None
                 and (error := deps.fetch_statements(meta.ticker))
             ):
@@ -160,10 +167,14 @@ def build_graph(
         finished = sum(turn.side == roles.BEAR for turn in state["debate"])
         return roles.RESEARCH_MANAGER if finished >= rounds else roles.BULL
 
-    analysts = {
+    every_analyst = {
         roles.MARKET_ANALYST: market_analyst_node,
         roles.NEWS_ANALYST: news_analyst_node,
         roles.FUNDAMENTALS_ANALYST: fundamentals_analyst_node,
+    }
+    # Only the chosen ones get a node, so `analysts_done` waits for them alone (task 11.4).
+    analysts = {
+        role: node for role, node in every_analyst.items() if roles.ANALYSTS[role] in chosen
     }
     graph = StateGraph(PipelineState)
     graph.add_node("prefetch", prefetch_node)

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sluice.agents.config import PipelineConfig
+from sluice.agents.config import ANALYST_KEYS, PipelineConfig
 from sluice.agents.llm import CachedLLM, LLMError, LLMRequest, LLMResponse, Message
 from sluice.agents.state import (
     Call,
@@ -269,14 +269,29 @@ def citable_refs(
     return set().union(*(cited_refs(text) for text in texts)) & known
 
 
+def absent_analysts(config: PipelineConfig) -> list[str]:
+    """The analysts the config leaves out, in the fixed order (task 11.4)."""
+    return [key for key in ANALYST_KEYS if key not in config.selected_analysts]
+
+
 def reports_prompt(
     meta: Meta,
     reports: dict[str, Report],
     debate: list[Turn],
     followups: list[FollowUp] | None = None,
+    absent: list[str] | None = None,
 ) -> str:
-    """Reports, debate turns and follow-ups: nobody after the analysts sees their sources."""
+    """Reports, debate turns and follow-ups: nobody after the analysts sees their sources.
+
+    `absent` names the analysts the config left out. Said outright, so that a missing
+    news report is not read as there having been no news.
+    """
     parts = [_header(meta)]
+    if absent:
+        parts.append(
+            f"This run has no {' or '.join(absent)} analyst; "
+            "that says nothing about the stock either way."
+        )
     for name, report in sorted(reports.items()):
         marker = " (no data)" if report.no_data else ""
         parts.append(f"## {name} report{marker}\n{report.text}")
@@ -331,7 +346,8 @@ def debater(state: PipelineState, llm: CachedLLM, config: PipelineConfig, side: 
             raise ValueError(f"the turn cites ids that are not in the reports: {unknown}")
         return Turn(round=round_number, side=side, text=text)
 
-    request = _request(config, side, reports_prompt(meta, reports, debate))
+    prompt = reports_prompt(meta, reports, debate, absent=absent_analysts(config))
+    request = _request(config, side, prompt)
     try:
         turn, answers = llm.complete_checked(request, check, meta.repeat, config.retries)
     except LLMError as error:
@@ -364,7 +380,9 @@ def research_manager(state: PipelineState, llm: CachedLLM, config: PipelineConfi
             raise ValueError("no more follow-up questions can be asked; decide now")
         return verdict
 
-    prompt = reports_prompt(meta, reports, state.get("debate", []), followups)
+    prompt = reports_prompt(
+        meta, reports, state.get("debate", []), followups, absent_analysts(config)
+    )
     if may_ask:
         prompt += FOLLOWUPS_OPEN.format(calls=config.tools.followup_calls)
     elif followups:

@@ -26,3 +26,13 @@ def series(last: date, count: int, drift: float = 0.001, start: float = 100.0) -
             Bar(day=day, open=open_price, close=close, raw_close=close * 1.02, volume=volume)
         )
     return bars
+
+
+def with_wicks(history: list[Bar]) -> list[Bar]:
+    """`history` with a high 1% above and a low 1% below the day's open and close."""
+    return [
+        bar.model_copy(
+            update={"high": max(bar.open, bar.close) * 1.01, "low": min(bar.open, bar.close) * 0.99}
+        )
+        for bar in history
+    ]

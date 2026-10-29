@@ -9,7 +9,7 @@ from typing import Literal
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
-from sluice.agents.config import PipelineConfig
+from sluice.agents.config import ANALYST_KEYS, PipelineConfig
 from sluice.agents.graph import run
 from sluice.agents.prefetch import backtest_decision_time
 from sluice.agents.state import PipelineState, dump_state
@@ -80,12 +80,15 @@ def unprepared(
     prices: PriceStore,
     benchmark: str,
     weight_tables: list[StoredTable] | None = None,
+    analysts: Iterable[str] = ANALYST_KEYS,
 ) -> list[str]:
     """What is missing for a batch to run without avoidable gaps.
 
     A run that lacks statements, prices or (for weighted news, when
     `weight_tables` is given) a weight table still finishes, and a finished
     run is never run again; so the gap would stay in the results for good.
+    Statements are only needed when the fundamentals analyst is among `analysts`;
+    prices always are, since the labels and the evaluation use them.
     """
     cells = list(cells)
     if not cells:
@@ -95,7 +98,7 @@ def unprepared(
     problems = [
         f"{ticker}: no statements stored (sluice fundamentals fetch --tickers {ticker})"
         for ticker in tickers
-        if statements.quarters(ticker) is None
+        if "fundamentals" in analysts and statements.quarters(ticker) is None
     ]
     # Also fetches each series once, here, rather than from several workers at a time.
     for ticker in dict.fromkeys([*tickers, canonical(benchmark)]):

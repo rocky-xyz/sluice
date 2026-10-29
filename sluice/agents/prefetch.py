@@ -76,15 +76,14 @@ def prefetch_prices(
         if canonical(ticker) == benchmark
         else prices.history(benchmark, as_of, config.lookback_days)
     )
-    values = indicators.compute(bars, reference)
-    expected = [
-        name for name in indicators.NAMES if reference is not None or not name.startswith("excess_")
-    ]
+    chosen = config.selected_indicators
+    values = indicators.compute(bars, reference, chosen)
+    expected = [name for name in chosen if reference is not None or not name.startswith("excess_")]
     if missing := [name for name in expected if name not in values]:
         gaps.append(Gap(kind="prices", reason=f"could not compute: {', '.join(missing)}"))
     shown = [
         PriceInput(ref=f"P:{name}", name=name, value=round(values[name], VALUE_DIGITS))
-        for name in indicators.NAMES
+        for name in chosen
         if name in values
     ]
     return shown, as_of, gaps
@@ -310,23 +309,35 @@ def prefetch(
 ) -> Inputs:
     """Everything the analysts will see, none of it from at or after the decision time.
 
-    `weighting` is needed exactly when the config asks for weighted news.
+    Only the chosen analysts' data is fetched; an analyst left out has no inputs and no
+    gaps (docs/specs/10-configurable-components.md). `weighting` is needed exactly when
+    the config asks for weighted news.
     """
     if config.news.weighted and weighting is None:
         raise ValueError(f"config {config.version} weights news but no weighting was given")
-    indicators_shown, as_of, price_gaps = prefetch_prices(
-        prices, ticker, decision_time, config.prices
-    )
+    chosen = config.selected_analysts
+    indicators_shown: list[PriceInput] = []
+    as_of: date | None = None
+    price_gaps: list[Gap] = []
+    if "market" in chosen:
+        indicators_shown, as_of, price_gaps = prefetch_prices(
+            prices, ticker, decision_time, config.prices
+        )
+    news: list[NewsInput] = []
     signals: list[SignalInput] = []
-    if weighting is not None and config.news.weighted:
+    news_gaps: list[Gap] = []
+    if "news" in chosen and weighting is not None and config.news.weighted:
         news, signals, news_gaps = prefetch_weighted_news(
             store, ticker, decision_time, config.news, weighting
         )
-    else:
+    elif "news" in chosen:
         news, news_gaps = prefetch_news(store, ticker, decision_time, config.news)
-    figures, fundamentals_gaps = prefetch_fundamentals(
-        statements, prices, ticker, decision_time, config.fundamentals
-    )
+    figures: list[FundamentalInput] = []
+    fundamentals_gaps: list[Gap] = []
+    if "fundamentals" in chosen:
+        figures, fundamentals_gaps = prefetch_fundamentals(
+            statements, prices, ticker, decision_time, config.fundamentals
+        )
     return Inputs(
         prices=indicators_shown,
         prices_as_of=as_of,

@@ -262,7 +262,7 @@ def batch(
         ):
             tables = weighting.tables if weighting else None
             problems = batching.unprepared(
-                cells, statements, prices, config.prices.benchmark, tables
+                cells, statements, prices, config.prices.benchmark, tables, config.selected_analysts
             )
             for problem in problems:
                 typer.echo(f"Not ready: {problem}", err=True)
@@ -1299,8 +1299,9 @@ def _pipeline_gate(runs: Path, workers: int, tickers: list[str]) -> Iterator:
 
             def run(config, cells):
                 if problems := batching.unprepared(
-                    cells, statements, prices, config.prices.benchmark
-                ):
+                    cells, statements, prices, config.prices.benchmark,
+                    analysts=config.selected_analysts,
+                ):  # fmt: skip
                     raise ValueError("not ready: " + "; ".join(problems))
 
                 def make_graph():

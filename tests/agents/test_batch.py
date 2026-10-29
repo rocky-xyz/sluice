@@ -131,6 +131,15 @@ def test_missing_statements_and_prices_are_reported_before_running(world):
     assert unprepared([], harness.statements, harness.prices, "SPY") == []
 
 
+def test_statements_are_only_needed_when_the_fundamentals_analyst_runs(world):
+    harness = Harness(world, any_news_model())
+    cells = grid([*TICKERS, "KO"], DAYS)
+    problems = unprepared(
+        cells, harness.statements, harness.prices, "SPY", analysts=("market", "news")
+    )
+    assert problems == ["KO: no prices up to 2026-09-30"]  # prices are still needed
+
+
 # --- running ---
 
 

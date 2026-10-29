@@ -11,6 +11,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from sluice.agents import indicators
 from sluice.agents.cache import CallCache
 from sluice.agents.config import (
+    ANALYST_KEYS,
     FundamentalsConfig,
     NewsConfig,
     PipelineConfig,
@@ -39,7 +40,7 @@ from sluice.news.models import NewsItem
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
 from tests.fundamentals.statements import stock
-from tests.prices.series import series
+from tests.prices.series import series, with_wicks
 
 DAY = date(2026, 9, 30)
 CLOSE = datetime(2026, 9, 30, 20, 0, tzinfo=UTC)  # 16:00 Eastern
@@ -956,3 +957,109 @@ def test_an_adhoc_ticker_outside_the_universe_is_marked(store, tmp_path):
     # the same ticker as a backtest is not marked: the note is about ad-hoc analysis
     again = go(pipeline(store, tmp_path, model, with_statements=False), ticker="TSLA", repeat=1)
     assert not any("universe" in note for note in again["decision"].notes)
+
+
+# --- choosing analysts and indicators (docs/specs/10-configurable-components.md, task 11.4) ---
+
+LATER = date(2026, 10, 9)  # the stored bars go on past the decision day
+
+
+@pytest.fixture
+def wicked(tmp_path):
+    """Prices with highs and lows, so that every indicator can be computed."""
+    with PriceStore(tmp_path / "wicked.db") as prices:
+        prices.replace("NVDA", with_wicks(series(LATER, 267, drift=0.002)))
+        prices.replace("SPY", with_wicks(series(LATER, 267, drift=0.001)))
+        yield prices
+
+
+def picking(*names: str) -> PricesConfig:
+    return PricesConfig(lookback_days=250, benchmark="SPY", indicators=names)
+
+
+@pytest.mark.parametrize("name", indicators.ALL)
+def test_no_indicator_moves_when_every_later_bar_changes(wicked, name):
+    before = prefetch_prices(wicked, "NVDA", CLOSE, picking(name))
+    assert [item.name for item in before[0]] == [name] and before[2] == []
+
+    for ticker in ("NVDA", "SPY"):
+        bars = wicked.history(ticker, LATER, limit=1000)
+        wild = {"close": 1.0, "high": 500.0, "low": 0.5, "volume": 9e9}
+        wicked.replace(
+            ticker, [bar if bar.day <= DAY else bar.model_copy(update=wild) for bar in bars]
+        )
+    assert prefetch_prices(wicked, "NVDA", CLOSE, picking(name)) == before
+
+    # and the check has teeth: changing the decision day's own bar does change it
+    bars = wicked.history("NVDA", LATER, limit=1000)
+    moved = {"close": bars[0].close, "low": bars[0].close * 0.99, "volume": 3e6}
+    wicked.replace(
+        "NVDA", [bar if bar.day != DAY else bar.model_copy(update=moved) for bar in bars]
+    )
+    assert prefetch_prices(wicked, "NVDA", CLOSE, picking(name)) != before
+
+
+def test_only_the_picked_indicators_are_shown_in_the_registry_order(wicked):
+    shown, _, gaps = prefetch_prices(wicked, "NVDA", CLOSE, picking("kdj_d", "rsi_14"))
+    assert [item.name for item in shown] == ["rsi_14", "kdj_d"]
+    assert gaps == []
+
+
+def test_a_picked_indicator_without_highs_and_lows_is_a_gap(prices):
+    shown, _, gaps = prefetch_prices(prices, "NVDA", CLOSE, picking("rsi_14", "atr_14_pct"))
+    assert [item.name for item in shown] == ["rsi_14"]
+    assert [gap.reason for gap in gaps] == ["could not compute: atr_14_pct"]
+
+
+ABSENT_NOTE = "that says nothing about the stock either way."
+
+
+def test_only_the_chosen_analysts_run_and_the_others_are_said_to_be_absent(stocked, tmp_path):
+    model = FakeModel(bull=["It will rise [P:ret_5d]."], manager=[verdict("P:ret_5d")])
+    config = configured(analysts=("market",), debate_rounds=1)
+    state = go(pipeline(stocked, tmp_path, model, with_statements=False, config=config))
+
+    assert state["meta"].status == "ok"
+    assert set(state["reports"]) == {"market"}
+    assert [role for role, _ in model.requests] == [
+        "market_analyst", "bull", "bear", "research_manager",
+    ]  # fmt: skip
+    inputs = state["inputs"]
+    assert inputs.prices and inputs.news == [] and inputs.fundamentals == []
+    assert inputs.gaps == [] and state["decision"].notes == []  # left out is not missing
+    note = f"This run has no news or fundamentals analyst; {ABSENT_NOTE}"
+    for role in ("bull", "bear", "research_manager"):
+        assert note in model.asked(role)[0].messages[1].content
+
+
+def test_choosing_all_three_asks_exactly_what_the_default_asks(stocked, tmp_path):
+    asked = []
+    for name, config in [("default", CONFIG), ("all", configured(analysts=ANALYST_KEYS))]:
+        model = FakeModel()
+        go(pipeline(stocked, tmp_path / name, model, config=config))
+        asked.append(sorted((role, request.messages) for role, request in model.requests))
+    assert asked[0] == asked[1]
+    assert ABSENT_NOTE not in asked[0][-1][1][1].content  # the research manager's prompt
+
+
+def test_when_every_chosen_analyst_has_nothing_the_run_fails(stocked, tmp_path):
+    model = FakeModel()
+    config = configured(analysts=("fundamentals",))
+    state = go(pipeline(stocked, tmp_path, model, with_statements=False, config=config))
+    assert state["meta"].status == "failed"
+    assert "no report has any data" in state["meta"].failure
+    assert model.requests == []  # the stored news is not looked at: its analyst is not chosen
+
+
+def test_an_adhoc_run_only_brings_in_what_its_analysts_need(store, tmp_path):
+    def forbidden(ticker):
+        raise AssertionError("nothing reads it in this config")
+
+    model = FakeModel(manager=[verdict("P:ret_5d")])
+    graph = pipeline(
+        store, tmp_path, model, with_statements=False, config=configured(analysts=("market",)),
+        collect_news=forbidden, fetch_statements=forbidden,
+    )  # fmt: skip
+    state = go(graph, mode="adhoc")
+    assert state["meta"].status == "ok"
+    assert state["inputs"].gaps == []

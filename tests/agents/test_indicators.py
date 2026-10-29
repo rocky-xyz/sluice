@@ -24,7 +24,7 @@ from sluice.agents.indicators import (
 from sluice.agents.roles import PRICE_LABELS, _price_line
 from sluice.agents.state import PriceInput
 from sluice.prices.store import Bar
-from tests.prices.series import series
+from tests.prices.series import series, with_wicks
 
 LAST = date(2026, 9, 30)
 
@@ -52,15 +52,6 @@ def candles(rows, first=date(2026, 1, 5)) -> list[Bar]:
         for i, (high, low, close) in enumerate(rows)
     ]
 
-
-def with_wicks(history: list[Bar]) -> list[Bar]:
-    """`history` with a high 1% above and a low 1% below the day's open and close."""
-    return [
-        bar.model_copy(
-            update={"high": max(bar.open, bar.close) * 1.01, "low": min(bar.open, bar.close) * 0.99}
-        )
-        for bar in history
-    ]
 
 
 def test_trailing_return_compares_with_the_close_n_days_back():
