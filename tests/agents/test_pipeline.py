@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import warnings
 from datetime import UTC, date, datetime, timedelta
@@ -348,6 +349,74 @@ def test_an_edited_config_has_another_digest_and_unknown_keys_are_refused(tmp_pa
     assert load_config("v1", tmp_path).digest != load_config("v2", tmp_path).digest
     with pytest.raises(ValueError):
         load_config("v3", tmp_path)
+
+
+# Picking analysts and indicators (docs/specs/10-configurable-components.md, task 11.3).
+
+
+def configured(**changes) -> PipelineConfig:
+    """CONFIG with `changes`, validated as a loaded file would be."""
+    tree = CONFIG.model_dump()
+    for key, value in changes.items():
+        if "." in key:
+            section, name = key.split(".")
+            tree[section] = {**tree[section], name: value}
+        else:
+            tree[key] = value
+    return PipelineConfig(**tree)
+
+
+@pytest.mark.parametrize("version, digest", [
+    ("v1", "97b47162"), ("v2", "ed2e4c63"), ("v3", "49da8839"),
+])  # fmt: skip
+def test_the_shipped_configs_keep_their_digests_and_choose_everything(version, digest):
+    config = load_config(version, Path(__file__).parents[2] / "configs")
+    assert config.digest == digest  # their runs and cached answers stay theirs
+    assert (config.analysts, config.prices.indicators) == (None, None)
+    assert config.selected_analysts == ("market", "news", "fundamentals")
+    assert config.prices.selected_indicators == indicators.NAMES
+
+
+def test_analysts_and_indicators_are_read_from_the_file(tmp_path):
+    source = (Path(__file__).parents[2] / "configs/pipeline/v1.toml").read_text()
+    folder = tmp_path / "pipeline"
+    folder.mkdir()
+    picked = source.replace(
+        'benchmark = "SPY"', 'benchmark = "SPY"\nindicators = ["kdj_k", "ret_5d"]'
+    )
+    (folder / "custom.toml").write_text('analysts = ["news", "market"]\n' + picked)
+
+    config = load_config("custom", tmp_path)
+    assert config.selected_analysts == ("market", "news")  # in the fixed order
+    assert config.prices.selected_indicators == ("ret_5d", "kdj_k")
+
+
+def test_indicators_written_in_another_order_select_the_same():
+    one = configured(**{"prices.indicators": ("rsi_14", "bb_pctb_20")})
+    two = configured(**{"prices.indicators": ("bb_pctb_20", "rsi_14")})
+    assert one.prices.selected_indicators == two.prices.selected_indicators
+
+
+@pytest.mark.parametrize("changes, message", [
+    ({"analysts": ()}, "analysts is empty"),
+    ({"analysts": ("news", "news")}, "more than once"),
+    ({"analysts": ("macro",)}, "analysts"),
+    ({"prices.indicators": ()}, "indicators is empty"),
+    ({"prices.indicators": ("rsi_14", "rsi_14")}, "more than once"),
+    ({"prices.indicators": ("rsi_14", "sma_7")}, "sma_7"),
+    ({"analysts": ("news",), "prices.indicators": ("rsi_14",)}, "market analyst is not chosen"),
+    ({"analysts": ("market",), "news.weighted": True}, "news analyst is not chosen"),
+    ({"analysts": ("market", "news"), "tools": {}}, "[tools]"),
+    ({"prices.indicators": ("rsi_14",), "tools": {}}, "[tools]"),
+])  # fmt: skip
+def test_choices_that_do_not_fit_are_refused(changes, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        configured(**changes)
+
+
+def test_tools_take_all_three_analysts_written_out_or_left_out():
+    assert configured(tools={}).tools is not None
+    assert configured(tools={}, analysts=("fundamentals", "market", "news")).tools is not None
 
 
 # --- the graph ---
