@@ -187,6 +187,46 @@ def analyze(
         console.print(f"note: {note}", markup=False)
 
 
+@app.command("configure")
+def configure() -> None:
+    """Pick analysts, indicators, debate depth and news weighting; write them as a new config."""
+    import sys
+
+    from sluice.agents import configure as cfg
+    from sluice.agents.config import CONFIG_ROOT
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.echo(
+            "sluice configure asks questions and needs a terminal; "
+            "write a config under configs/pipeline/ by hand instead.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    picked = cfg.interview()
+    if picked is None:
+        typer.echo("Cancelled; nothing written.")
+        raise typer.Exit(code=1)
+    base, choices, name = picked
+    source = (CONFIG_ROOT / "pipeline" / f"{base.version}.toml").read_text()
+    try:
+        text = cfg.build_config_text(source, base, choices, name, cfg.now_utc())
+    except ValueError as exc:
+        typer.echo(f"Not written: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    console = Console()
+    console.print(f"New config {name}, from {base.version}-{base.digest}:")
+    for line in cfg.changes(base, choices) or ["no changes"]:
+        console.print(f"  {line}", markup=False)
+    if not cfg.confirm("Write it?"):
+        typer.echo("Cancelled; nothing written.")
+        raise typer.Exit(code=1)
+    path = cfg.write_config(name, text)
+    cfg.save_last(base.version, choices)
+    console.print(f"Wrote {path}. Run it with, for example:", markup=False)
+    console.print(f"  sluice analyze NVDA --date 2026-09-30 --config {name}", markup=False)
+
+
 @app.command("batch")
 def batch(
     tickers: Annotated[
