@@ -20,6 +20,12 @@ validation period has a trial number; there are at most 20 for the whole loop.
 (prompts and tool-loop rules), with two budgets: up to 30 screens on 55 fixed
 validation runs, and up to 5 full evaluations, each only after a passed screen.
 
+Pipeline files with other names than `vN` are written by `sluice configure`: a
+base version with the analysts, market indicators, debate depth and news
+weighting ticked in the terminal, and a header saying what changed. A file the
+command writes is never overwritten. They are configs to run and look at, not
+candidates: only the gate above makes a pipeline champion.
+
 `patterns/vN.toml` holds the candlestick rules of the pattern study, and
 `universe/` the fixed stock lists it runs on (today's S&P 500, read once, with
 the date it was read: looked back on, it carries survivorship bias).

@@ -2,7 +2,7 @@
 
 A multi-agent equity research pipeline that scores every news item, learns how
 much each source and event type should count, and turns the result into
-position sizes with code rather than with an LLM.
+position sizes with code2.
 
 This is a research and decision-support tool. It does not place orders, and
 nothing here is financial advice.
@@ -107,6 +107,8 @@ sluice news fit-weights                  # fit and save one source/event-type we
 sluice fundamentals fetch                # quarterly statements from Alpha Vantage (resumable; 25 calls a day)
 sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
 sluice analyze TSLA                      # or as of now, for any ticker: collects its news first
+sluice configure                         # tick analysts, indicators, debate depth, news weighting: writes a new config
+sluice analyze NVDA --date 2026-09-30 --config market-news   # run a config written that way
 sluice batch                             # backtest the universe on every tenth trading day (resumable)
 sluice batch --config v2                 # the same with weighted news (needs TYPESAFE_API_KEY and fit-weights)
 sluice score                             # score stored news with Jev (needs TYPESAFE_API_KEY; resumable)
