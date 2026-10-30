@@ -1,4 +1,5 @@
-"""`sluice configure`: a new pipeline config from an existing one and a few choices.
+"""A new pipeline config from an existing one and a few choices: the "New..." step of `sluice`
+(once `sluice configure`; docs/specs/10, 12).
 
 docs/specs/10-configurable-components.md, task 11.5. The choices become a file under
 `configs/pipeline/`, so a run of it has its own digest and run ids like any version.
@@ -239,7 +240,7 @@ def build_config_text(
     while start < len(lines) and lines[start].startswith("#"):
         start += 1
     header = [
-        f"# Pipeline config {name}: written by `sluice configure` on {now:%Y-%m-%d %H:%M} UTC,",
+        f"# Pipeline config {name}: written by `sluice` (New...) on {now:%Y-%m-%d %H:%M} UTC,",
         f"# from {base.version}-{base.digest}. Changes from it:",
         *(f"#   {line}" for line in changes(base, choices) or ["none"]),
         "# A change to a version that has been run is a new file.",

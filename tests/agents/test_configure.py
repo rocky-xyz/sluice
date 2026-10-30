@@ -160,7 +160,7 @@ def test_choices_that_do_not_fit_are_not_written(root):
 def test_the_header_says_where_the_config_came_from(root):
     text = build(root, "v1", MARKET_NEWS)
     v1 = load_config("v1", root)
-    assert text.startswith("# Pipeline config custom: written by `sluice configure` on 2026-10-29")
+    assert text.startswith("# Pipeline config custom: written by `sluice` (New...) on 2026-10-29")
     assert f"# from v1-{v1.digest}. Changes from it:" in text
     assert "#   indicators added: macd_hist_pct, bb_pctb_20, bb_width_20, atr_14_pct, range_250d" in text
 

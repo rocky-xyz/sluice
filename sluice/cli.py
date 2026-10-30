@@ -11,17 +11,20 @@ from rich.table import Table
 from sluice import __version__
 from sluice.universe import COMPANIES, UNIVERSE
 
-app = typer.Typer(help="Multi-agent equity research pipeline.", no_args_is_help=True)
+RESEARCH, DATA = "Research", "Data"  # the groups of `sluice --help`
+app = typer.Typer(
+    help="Multi-agent equity research pipeline. Run `sluice` alone in a terminal to analyse a stock."
+)
 news_app = typer.Typer(help="News collection and storage.", no_args_is_help=True)
-app.add_typer(news_app, name="news")
+app.add_typer(news_app, name="news", rich_help_panel=DATA)
 fundamentals_app = typer.Typer(help="Financial statements.", no_args_is_help=True)
-app.add_typer(fundamentals_app, name="fundamentals")
+app.add_typer(fundamentals_app, name="fundamentals", rich_help_panel=DATA)
 calibration_app = typer.Typer(help="Hand-labeling Jev's scores against a sample.", no_args_is_help=True)
-app.add_typer(calibration_app, name="calibration")
+app.add_typer(calibration_app, name="calibration", rich_help_panel=RESEARCH)
 evolve_app = typer.Typer(help="The evolution loop over sizing configs.", no_args_is_help=True)
-app.add_typer(evolve_app, name="evolve")
+app.add_typer(evolve_app, name="evolve", rich_help_panel=RESEARCH)
 patterns_app = typer.Typer(help="Candlestick patterns and their study.", no_args_is_help=True)
-app.add_typer(patterns_app, name="patterns")
+app.add_typer(patterns_app, name="patterns", rich_help_panel=RESEARCH)
 
 
 def _version(value: bool) -> None:
@@ -30,13 +33,22 @@ def _version(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False, "--version", callback=_version, is_eager=True, help="Show the version and exit."
     ),
 ) -> None:
     load_dotenv()  # API keys live in a local .env; real environment variables win
+    if ctx.invoked_subcommand is not None:
+        return
+    import sys
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):  # a pipe or CI: no questions
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+    _session()
 
 
 @contextmanager
@@ -70,37 +82,39 @@ def _weighting(config, cache, on_event=None) -> Iterator:
         )
 
 
-@app.command("analyze")
-def analyze(
-    ticker: Annotated[str, typer.Argument(help="Ticker to analyse.")],
-    day: Annotated[
-        str | None,
-        typer.Option(
-            "--date",
-            help="Decision day (YYYY-MM-DD): a backtest run deciding at its close. "
-            "Without it the run is ad hoc: it decides now and first collects the ticker's news.",
-        ),
-    ] = None,
-    config_version: Annotated[
-        str, typer.Option("--config", help="Pipeline config version under configs/pipeline/.")
-    ] = "v1",
-    repeat: Annotated[int, typer.Option("--repeat", help="Which repeat of this run.")] = 0,
-    db: Annotated[Path, typer.Option("--db", help="SQLite news store.")] = Path("data/news.db"),
-    out: Annotated[
-        Path | None, typer.Option("--out", help="Write the full run state to this JSON file.")
-    ] = None,
-) -> None:
-    """Run the research pipeline for one ticker, as of a past close or as of now."""
-    import json
+def _session() -> None:
+    """The welcome page, the questions, the live panel and the report (docs/specs/12)."""
     import os
-    from datetime import UTC, date, datetime
+    from datetime import UTC, datetime
+
+    from sluice.agents.llm import ENV_KEY
+    from sluice.session import flow
+
+    console = Console()
+    flow.welcome(console)
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
+        raise typer.Exit(code=2)
+    plan = flow.ask(console, datetime.now(UTC))
+    if plan is None:
+        typer.echo("Cancelled; nothing run.")
+        raise typer.Exit(code=1)
+    flow.save_last(plan)
+    _run_plan(plan, console, key)
+
+
+def _run_plan(plan, console: Console, key: str) -> None:
+    """Run what the questions settled on, with the live panel, then print the report."""
+    import os
+    from datetime import UTC, datetime
 
     from sluice.agents.cache import CallCache
     from sluice.agents.config import load_config
-    from sluice.agents.graph import Deps, build_graph, open_checkpointer, run
-    from sluice.agents.llm import ENV_KEY, CachedLLM, DeepSeekClient
+    from sluice.agents.graph import Deps, build_graph, open_checkpointer
+    from sluice.agents.llm import CachedLLM, DeepSeekClient
     from sluice.agents.prefetch import backtest_decision_time
-    from sluice.agents.state import dump_state
+    from sluice.costs import Tally
     from sluice.fundamentals import alphavantage
     from sluice.fundamentals import store as statements_store
     from sluice.fundamentals.store import FundamentalsStore
@@ -108,29 +122,28 @@ def analyze(
     from sluice.news.store import NewsStore
     from sluice.prices.store import PriceStore
     from sluice.prices.yahoo import fetch_bars
+    from sluice.session import run as session
+    from sluice.session.panel import Board
 
-    key = os.environ.get(ENV_KEY, "").strip()
-    if not key:
-        typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
-        raise typer.Exit(code=2)
-    if day is None:
+    config = load_config(plan.config)
+    if plan.day is None:
         mode, decision_time = "adhoc", datetime.now(UTC)
+        when = f"ad hoc, {decision_time:%Y-%m-%d %H:%M} UTC"
     else:
-        mode = "backtest"
-        try:
-            decision_time = backtest_decision_time(date.fromisoformat(day))
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc), param_hint="--date") from exc
-    config = load_config(config_version)
+        mode, decision_time = "backtest", backtest_decision_time(plan.day)
+        when = f"backtest {plan.day}"
+    title = f"sluice · {plan.ticker} · {when} · {config.version}-{config.digest}"
+    live = session.fits(console)
+    board = Board(title, config, Tally())
+    on_event = session.listener(board, console, live)
     statements = FundamentalsStore()
-
     checkpointer = open_checkpointer()
     try:
         with (
-            NewsStore(db) as store,
+            NewsStore(Path("data/news.db")) as store,
             PriceStore(fetch=fetch_bars) as prices,
             CallCache() as cache,
-            _weighting(config, cache) as weighting,
+            _weighting(config, cache, on_event) as weighting,
         ):
 
             def collect_news(symbol: str) -> str | None:
@@ -145,91 +158,30 @@ def analyze(
                 )
                 return result.stopped or next(iter(result.failed), None)
 
-            llm = CachedLLM(cache, DeepSeekClient(key))
+            llm = CachedLLM(cache, DeepSeekClient(key), on_event=on_event)
             deps = Deps(
-                store, prices, statements, llm, config, collect_news, fetch_statements, weighting
-            )
+                store, prices, statements, llm, config, collect_news, fetch_statements,
+                weighting, on_event=on_event,
+            )  # fmt: skip
             graph = build_graph(deps, checkpointer)
-            state = run(graph, config, ticker, decision_time, repeat=repeat, mode=mode)
+            try:
+                state = session.execute(
+                    graph, config, plan.ticker, decision_time, mode, board, console, live
+                )
+            except KeyboardInterrupt:
+                again = "Run the same choices again to continue from where it stopped."
+                if mode == "adhoc":
+                    again = "An ad hoc run decides as of now, so it starts afresh; answers "
+                    again += "already received come from the cache without paying again."
+                typer.echo(f"Stopped. {again}", err=True)
+                raise typer.Exit(code=130) from None
     finally:
         checkpointer.conn.close()
-
-    saved = dump_state(state)
-    if out is not None:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n")
-    meta, decision = state["meta"], state.get("decision")
-    console = Console()
-    inputs = state["inputs"]
-    console.print(
-        f"{meta.run_id}  price indicators: {len(inputs.prices)} (as of {inputs.prices_as_of}), "
-        f"news items: {len(inputs.news)}, fundamentals: {len(inputs.fundamentals)}"
-    )
-    for signal in inputs.signals:
-        console.print(
-            f"  {signal.ref}: {signal.value:+.2e} over {signal.n_items} scored items "
-            f"(weights as of {signal.weights_as_of:%Y-%m-%d})"
-        )
-    for gap in inputs.gaps:
-        console.print(f"  gap in {gap.kind}: {gap.reason}", markup=False)
-    for call in state.get("usage", []):
-        source = "cache" if call.cached else "call"
-        console.print(
-            f"  {call.role} ({call.model}, {source}): "
-            f"{call.input_tokens} in, {call.output_tokens} out"
-        )
-    if decision is None:
-        typer.echo(f"Failed: {meta.failure}", err=True)
+    if not session.finish(state, board, console):
         raise typer.Exit(code=1)
-    console.print(f"[bold]{decision.rating}[/bold]  confidence {decision.confidence:.2f}")
-    for evidence in decision.evidence:
-        console.print(f"  {evidence.direction}: {evidence.claim} {evidence.refs}", markup=False)
-    console.print(decision.rationale, markup=False)
-    for note in decision.notes:
-        console.print(f"note: {note}", markup=False)
 
 
-@app.command("configure")
-def configure() -> None:
-    """Pick analysts, indicators, debate depth and news weighting; write them as a new config."""
-    import sys
-
-    from sluice.agents import configure as cfg
-    from sluice.agents.config import CONFIG_ROOT
-
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        typer.echo(
-            "sluice configure asks questions and needs a terminal; "
-            "write a config under configs/pipeline/ by hand instead.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    picked = cfg.interview()
-    if picked is None:
-        typer.echo("Cancelled; nothing written.")
-        raise typer.Exit(code=1)
-    base, choices, name = picked
-    source = (CONFIG_ROOT / "pipeline" / f"{base.version}.toml").read_text()
-    try:
-        text = cfg.build_config_text(source, base, choices, name, cfg.now_utc())
-    except ValueError as exc:
-        typer.echo(f"Not written: {exc}", err=True)
-        raise typer.Exit(code=2) from exc
-
-    console = Console()
-    console.print(f"New config {name}, from {base.version}-{base.digest}:")
-    for line in cfg.changes(base, choices) or ["no changes"]:
-        console.print(f"  {line}", markup=False)
-    if not cfg.confirm("Write it?"):
-        typer.echo("Cancelled; nothing written.")
-        raise typer.Exit(code=1)
-    path = cfg.write_config(name, text)
-    cfg.save_last(base.version, choices)
-    console.print(f"Wrote {path}. Run it with, for example:", markup=False)
-    console.print(f"  sluice analyze NVDA --date 2026-09-30 --config {name}", markup=False)
-
-
-@app.command("batch")
+@app.command("batch", rich_help_panel=RESEARCH)
 def batch(
     tickers: Annotated[
         str, typer.Option("--tickers", help="Comma-separated tickers to run.")
@@ -368,7 +320,7 @@ def batch(
         raise typer.Exit(code=1)
 
 
-@app.command("evaluate")
+@app.command("evaluate", rich_help_panel=RESEARCH)
 def evaluate(
     configs: Annotated[
         list[str] | None,
@@ -538,7 +490,7 @@ def _evaluate_final(segment: str, symbols: list[str], runs: Path, out: Path | No
     Console().print(f"written to {out}")
 
 
-@app.command("score-reports")
+@app.command("score-reports", rich_help_panel=RESEARCH)
 def score_reports_command(
     configs: Annotated[
         list[str] | None,
@@ -591,7 +543,7 @@ def score_reports_command(
         raise typer.Exit(code=1)
 
 
-@app.command("score")
+@app.command("score", rich_help_panel=DATA)
 def score(
     tickers: Annotated[
         str, typer.Option("--tickers", help="Comma-separated tickers to score.")
