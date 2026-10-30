@@ -11,6 +11,12 @@ def test_sluice_alone_without_a_terminal_shows_the_help():
     assert "Run `sluice` alone in a terminal" in result.output
 
 
+def test_the_developer_session_without_a_terminal_also_shows_the_help():
+    result = runner.invoke(cli.app, ["--dev"])
+    assert result.exit_code == 0
+    assert "sluice --dev" in result.output
+
+
 def test_the_help_groups_the_other_commands():
     result = runner.invoke(cli.app, ["--help"], env={"COLUMNS": "120"})
     assert result.exit_code == 0

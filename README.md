@@ -96,7 +96,8 @@ below assume it is active.
 ## Usage
 
 ```bash
-sluice                                   # in a terminal: pick a ticker, a moment and a config, watch it run
+sluice                                   # in a terminal: a ticker, analysed now with the champion config
+sluice --dev                             # the same, plus backtesting a past close and picking or building a config
 sluice --version
 sluice news collect                      # fetch recent Yahoo Finance news for the universe
 sluice news collect --tickers NVDA,AMD   # or for chosen tickers
@@ -149,10 +150,12 @@ cloned to `data/`; items collected by hand are archived under `data/local/` so
 they never conflict with it.
 
 `sluice` on its own, in a terminal, is the way to run the pipeline for one
-ticker (it needs `DEEPSEEK_API_KEY`). After a welcome page it asks for a ticker,
-whether to decide now or at a past close, and a config; "New..." in that list
-ticks analysts, market indicators, debate depth and news weighting, and writes
-them as a new config first. While the run goes, a live panel shows each step's
+ticker (it needs `DEEPSEEK_API_KEY`). After a welcome page it asks for a ticker
+and analyses it as of now with the pipeline champion (`configs/pipeline/CHAMPION`).
+`sluice --dev` is for comparing methods: it also asks whether to decide now or at
+a past close, and which config; "New..." in that list ticks analysts, market
+indicators, debate depth and news weighting, and writes them as a new config
+first. While the run goes, a live panel shows each step's
 status and time, every model call with its tokens, the latest finished report,
 and a footer with calls, tokens, elapsed time and the dollars spent so far:
 DeepSeek at its peak or off-peak price by the hour in Beijing, Jev at its rate,

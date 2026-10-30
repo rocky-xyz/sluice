@@ -21,7 +21,7 @@ validation period has a trial number; there are at most 20 for the whole loop.
 validation runs, and up to 5 full evaluations, each only after a passed screen.
 
 Pipeline files with other names than `vN` are written by "New..." in the
-config list of `sluice`: a base version with the analysts, market indicators,
+config list of `sluice --dev`: a base version with the analysts, market indicators,
 debate depth and news weighting ticked in the terminal, and a header saying
 what changed. A file it writes is never overwritten. They are configs to run and look at, not
 candidates: only the gate above makes a pipeline champion.

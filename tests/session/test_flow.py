@@ -75,7 +75,7 @@ def test_v1_comes_first(root):
 
 def test_the_last_answers_come_back_without_what_is_gone(root, tmp_path):
     path = tmp_path / "last.json"
-    flow.save_last(Plan("NVDA", "backtest", date(2026, 9, 30), "v2"), path)
+    flow.save_last(Plan("NVDA", "backtest", date(2026, 9, 30), "v2"), True, path)
     assert flow.load_last(path, root) == {
         "ticker": "NVDA", "mode": "backtest", "day": "2026-09-30", "config": "v2",
     }  # fmt: skip
@@ -88,8 +88,25 @@ def test_the_last_answers_come_back_without_what_is_gone(root, tmp_path):
 
 def test_an_ad_hoc_plan_is_saved_without_a_day(tmp_path):
     path = tmp_path / "last.json"
-    flow.save_last(Plan("AMD", "adhoc", None, "v1"), path)
+    flow.save_last(Plan("AMD", "adhoc", None, "v1"), True, path)
     assert json.loads(path.read_text())["day"] is None
+
+
+def test_a_user_session_only_changes_the_remembered_ticker(tmp_path):
+    path = tmp_path / "last.json"
+    flow.save_last(Plan("NVDA", "backtest", date(2026, 9, 30), "v2"), True, path)
+    flow.save_last(Plan("AMD", "adhoc", None, "v3"), False, path)
+    assert json.loads(path.read_text()) == {
+        "ticker": "AMD", "mode": "backtest", "day": "2026-09-30", "config": "v2",
+    }  # fmt: skip
+    fresh = tmp_path / "fresh.json"
+    flow.save_last(Plan("KO", "adhoc", None, "v3"), False, fresh)
+    assert json.loads(fresh.read_text()) == {"ticker": "KO"}
+
+
+def test_the_user_session_runs_the_pipeline_champion(root):
+    (root / "pipeline" / "CHAMPION").write_text("v2\n")
+    assert flow.champion(root) == "v2"
 
 
 def test_new_writes_the_config_and_returns_its_name(root, monkeypatch, tmp_path):

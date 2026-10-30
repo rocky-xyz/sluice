@@ -13,7 +13,8 @@ from sluice.universe import COMPANIES, UNIVERSE
 
 RESEARCH, DATA = "Research", "Data"  # the groups of `sluice --help`
 app = typer.Typer(
-    help="Multi-agent equity research pipeline. Run `sluice` alone in a terminal to analyse a stock."
+    help="Multi-agent equity research pipeline. Run `sluice` alone in a terminal to analyse "
+    "a stock now; `sluice --dev` also backtests a past close and picks or builds a config."
 )
 news_app = typer.Typer(help="News collection and storage.", no_args_is_help=True)
 app.add_typer(news_app, name="news", rich_help_panel=DATA)
@@ -39,6 +40,9 @@ def main(
     version: bool = typer.Option(
         False, "--version", callback=_version, is_eager=True, help="Show the version and exit."
     ),
+    dev: bool = typer.Option(
+        False, "--dev", help="Developer session: backtest a past close, pick or build a config."
+    ),
 ) -> None:
     load_dotenv()  # API keys live in a local .env; real environment variables win
     if ctx.invoked_subcommand is not None:
@@ -48,7 +52,7 @@ def main(
     if not (sys.stdin.isatty() and sys.stdout.isatty()):  # a pipe or CI: no questions
         typer.echo(ctx.get_help())
         raise typer.Exit()
-    _session()
+    _session(dev)
 
 
 @contextmanager
@@ -82,7 +86,7 @@ def _weighting(config, cache, on_event=None) -> Iterator:
         )
 
 
-def _session() -> None:
+def _session(dev: bool) -> None:
     """The welcome page, the questions, the live panel and the report (docs/specs/12)."""
     import os
     from datetime import UTC, datetime
@@ -96,11 +100,11 @@ def _session() -> None:
     if not key:
         typer.echo(f"{ENV_KEY} is not set (put it in .env).", err=True)
         raise typer.Exit(code=2)
-    plan = flow.ask(console, datetime.now(UTC))
+    plan = flow.ask(console, datetime.now(UTC), dev)
     if plan is None:
-        typer.echo("Cancelled; nothing run.")
+        typer.echo("Nothing run.")
         raise typer.Exit(code=1)
-    flow.save_last(plan)
+    flow.save_last(plan, dev)
     _run_plan(plan, console, key)
 
 

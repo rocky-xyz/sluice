@@ -1,5 +1,9 @@
 """The welcome page and the questions of a terminal session (docs/specs/12, task 13.5).
 
+`sluice` is for users: a ticker, decided now, with the pipeline champion.
+`sluice --dev` is for comparing methods: it also asks whether to decide now or
+at a past close, and which config, or builds a new one.
+
 What can be checked without a terminal (a ticker, a backtest day, a config's
 one-line summary, the remembered answers) is a plain function here; `ask`
 only puts the questions.
@@ -20,6 +24,7 @@ from rich.text import Text
 from sluice import __version__
 from sluice.agents import configure as cfg
 from sluice.agents.config import CONFIG_ROOT, PipelineConfig, load_config
+from sluice.evolution.pipelines import champion
 from sluice.market_calendar import close_of, last_closed_session
 from sluice.universe import UNIVERSE, canonical
 
@@ -118,9 +123,19 @@ def load_last(path: Path = LAST, root: Path = CONFIG_ROOT) -> dict[str, Any]:
     return last
 
 
-def save_last(plan: Plan, path: Path = LAST) -> None:
+def save_last(plan: Plan, dev: bool, path: Path = LAST) -> None:
+    """Remember the answers; a user session only changes the ticker, not what --dev picked."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if dev:
+        data |= asdict(plan) | {"day": plan.day.isoformat() if plan.day else None}
+    else:
+        data["ticker"] = plan.ticker
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = asdict(plan) | {"day": plan.day.isoformat() if plan.day else None}
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
@@ -157,8 +172,8 @@ def new_config(console: Console, root: Path = CONFIG_ROOT) -> str | None:
     return name
 
 
-def ask(console: Console, now: datetime, root: Path = CONFIG_ROOT) -> Plan | None:
-    """The questions, until the user confirms a plan; None when they cancel."""
+def ask(console: Console, now: datetime, dev: bool, root: Path = CONFIG_ROOT) -> Plan | None:
+    """The questions, until the user confirms a plan; None when they cancel or cannot run."""
     import questionary  # only the interactive session needs it
 
     def asked(question: questionary.Question) -> Any:
@@ -176,47 +191,62 @@ def ask(console: Console, now: datetime, root: Path = CONFIG_ROOT) -> Plan | Non
             )))  # fmt: skip
             if outside_universe(ticker):
                 console.print(f"{ticker} is outside the study's universe: the rating will say so.")
-            mode = asked(questionary.select(
-                "Decide when?",
-                choices=[
-                    questionary.Choice("Now (ad hoc)", value="adhoc"),
-                    questionary.Choice("At a past close (backtest)", value="backtest"),
-                ],
-                default=last.get("mode", "backtest"),
-            ))  # fmt: skip
-            day = None
-            if mode == "backtest":
-                day = date.fromisoformat(asked(questionary.text(
-                    "Decision day (YYYY-MM-DD):",
-                    default=last.get("day", last_closed_session(now).isoformat()),
-                    validate=lambda text: date_problem(text, now) or True,
-                )).strip())  # fmt: skip
-            while True:
-                names = config_names(root)
-                listed = [
-                    questionary.Choice(f"{n:<14} {config_line(load_config(n, root))}", value=n)
-                    for n in names
-                ]
-                listed.append(questionary.Choice("New...  pick analysts, indicators, depth", NEW))
-                name = asked(questionary.select(
-                    "Which config?", choices=listed, default=last.get("config", "v1"),
-                ))  # fmt: skip
-                if name == NEW:
-                    name = new_config(console, root)
-                    if name is None:
-                        continue
-                config = load_config(name, root)
+            if dev:
+                mode, day, config = _developer_questions(asked, console, now, last, root)
+            else:
+                mode, day, config = "adhoc", None, load_config(champion(root), root)
                 problems = cfg.weighting_problems(config) if config.news.weighted else []
                 for problem in problems:
-                    console.print(f"Cannot run {name}: {problem}", markup=False)
-                if not problems:
-                    break
-            plan = Plan(ticker, mode, day, name)
+                    console.print(f"Cannot run {config.version}: {problem}", markup=False)
+                if problems:
+                    return None
+            plan = Plan(ticker, mode, day, config.version)
             console.print(Panel(summary(plan, config), title="About to run", border_style="cyan"))
             if asked(questionary.confirm("Run it?", default=True)):
                 return plan
-            last = {"ticker": ticker, "mode": mode, "config": name} | (
+            last = {"ticker": ticker, "mode": mode, "config": config.version} | (
                 {"day": day.isoformat()} if day else {}
             )
     except KeyboardInterrupt:
         return None
+
+
+def _developer_questions(asked, console: Console, now: datetime, last: dict, root: Path):
+    """--dev only: decide now or at a past close, and with which config (or a new one)."""
+    import questionary
+
+    mode = asked(questionary.select(
+        "Decide as of when?",
+        choices=[
+            questionary.Choice("Now (ad hoc)", value="adhoc"),
+            questionary.Choice("At a past close (backtest)", value="backtest"),
+        ],
+        default=last.get("mode", "backtest"),
+    ))  # fmt: skip
+    day = None
+    if mode == "backtest":
+        day = date.fromisoformat(asked(questionary.text(
+            "Decision day (YYYY-MM-DD):",
+            default=last.get("day", last_closed_session(now).isoformat()),
+            validate=lambda text: date_problem(text, now) or True,
+        )).strip())  # fmt: skip
+    while True:
+        names = config_names(root)
+        listed = [
+            questionary.Choice(f"{n:<14} {config_line(load_config(n, root))}", value=n)
+            for n in names
+        ]
+        listed.append(questionary.Choice("New...  pick analysts, indicators, depth", NEW))
+        name = asked(questionary.select(
+            "Which pipeline config?", choices=listed, default=last.get("config", "v1"),
+        ))  # fmt: skip
+        if name == NEW:
+            name = new_config(console, root)
+            if name is None:
+                continue
+        config = load_config(name, root)
+        problems = cfg.weighting_problems(config) if config.news.weighted else []
+        for problem in problems:
+            console.print(f"Cannot run {name}: {problem}", markup=False)
+        if not problems:
+            return mode, day, config
