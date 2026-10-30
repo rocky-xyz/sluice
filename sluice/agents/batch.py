@@ -24,10 +24,6 @@ FIRST_DAY = date(2026, 1, 2)  # the first trading day of the study
 EVERY = 10  # trading days between decisions: two weeks
 RATINGS_FILE = "ratings.jsonl"
 
-# Dollars per million tokens (input, output) at peak hours, from DeepSeek's price list on
-# 2026-10-14; off-peak is half. Only for the estimate printed after a batch.
-PRICES = {"deepseek-flash": (0.3, 1.2), "deepseek-v4-pro": (1.32, 3.96)}
-
 
 class Cell(BaseModel):
     """One run of the grid."""
@@ -205,18 +201,3 @@ def run_batch(
         results = list(pool.map(work, cells))
     write_ratings(out_dir, config)
     return results
-
-
-def estimated_cost(results: Iterable[CellResult]) -> tuple[dict[str, tuple[int, int]], float]:
-    """Tokens per model over these runs, and their cost in dollars at peak list prices."""
-    totals: dict[str, tuple[int, int]] = {}
-    for result in results:
-        for model, (used_in, used_out) in result.tokens.items():
-            have = totals.get(model, (0, 0))
-            totals[model] = (have[0] + used_in, have[1] + used_out)
-    cost = sum(
-        (used_in * PRICES[model][0] + used_out * PRICES[model][1]) / 1_000_000
-        for model, (used_in, used_out) in totals.items()
-        if model in PRICES
-    )
-    return totals, cost

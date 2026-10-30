@@ -6,9 +6,7 @@ import pytest
 from sluice.agents.batch import (
     RATINGS_FILE,
     Cell,
-    CellResult,
     decision_days,
-    estimated_cost,
     grid,
     run_batch,
     run_dir,
@@ -20,6 +18,7 @@ from sluice.agents.cache import CallCache
 from sluice.agents.graph import Deps, build_graph, open_checkpointer
 from sluice.agents.llm import CachedLLM
 from sluice.agents.prefetch import backtest_decision_time
+from sluice.costs import Tally, Usage
 from sluice.fundamentals.store import FundamentalsStore
 from sluice.news.store import NewsStore
 from sluice.prices.store import PriceStore
@@ -252,12 +251,14 @@ def test_a_day_without_trading_breaks_off_only_its_own_cell(world):
     assert "not a trading day" in results[0].failure
 
 
-def test_cost_adds_up_tokens_by_model():
-    tokens = {"deepseek-flash": (1_000_000, 500_000), "unknown-model": (5, 5)}
-    results = [
-        CellResult(ticker="NVDA", day=DAYS[0], repeat=repeat, status="ok", tokens=tokens)
-        for repeat in range(2)
-    ]
-    totals, cost = estimated_cost(results)
-    assert totals["deepseek-flash"] == (2_000_000, 1_000_000)
-    assert cost == pytest.approx(2 * 0.3 + 1 * 1.2)
+def test_a_rerun_of_finished_cells_makes_no_new_calls_to_pay_for(world):
+    harness = Harness(world, CitingModel(manager=[verdict("P:ret_5d")]))
+    first, again = Tally(), Tally()
+    cells = grid(["NVDA"], DAYS[:2])
+    harness.llm = CachedLLM(CallCache(world / "llm.db"), harness.model, on_event=first)
+    harness.run(cells)
+    harness.llm = CachedLLM(CallCache(world / "llm.db"), harness.model, on_event=again)
+    harness.run(cells)  # both cells come back from their checkpoints
+    llm, _ = first.snapshot()
+    assert (llm["fast-model"].new_calls, llm["deep-model"].new_calls) == (6, 2)
+    assert again.snapshot() == ({}, Usage())

@@ -40,8 +40,10 @@ def main(
 
 
 @contextmanager
-def _weighting(config, cache) -> Iterator:
-    """Scores, Jev and weight tables for a config that weights news; None when it does not."""
+def _weighting(config, cache, on_event=None) -> Iterator:
+    """Scores, Jev and weight tables for a config that weights news; None when it does not.
+
+    `on_event` hears every Jev answer (a cost tally)."""
     import os
 
     if not config.news.weighted:
@@ -64,7 +66,7 @@ def _weighting(config, cache) -> Iterator:
             scores=scores,
             tables=load_all(DEFAULT_ROOT, scoring.version),
             scoring=scoring,
-            jev=CachedJev(cache, JevClient(key)),
+            jev=CachedJev(cache, JevClient(key), on_event=on_event),
         )
 
 
@@ -266,6 +268,7 @@ def batch(
 
     from rich.progress import Progress
 
+    from sluice import costs
     from sluice.agents import batch as batching
     from sluice.agents.cache import CallCache
     from sluice.agents.config import load_config
@@ -294,11 +297,13 @@ def batch(
     checkpointer = open_checkpointer()
     opened: list[NewsStore] = []
     console = Console()
+    tally = costs.Tally()  # only the calls this command makes
+    started = datetime.now(UTC)
     try:
         with (
             PriceStore(fetch=fetch_bars) as prices,
             CallCache() as cache,
-            _weighting(config, cache) as weighting,
+            _weighting(config, cache, tally) as weighting,
         ):
             tables = weighting.tables if weighting else None
             problems = batching.unprepared(
@@ -309,7 +314,7 @@ def batch(
             if problems and not allow_gaps:
                 typer.echo("Fix these or pass --allow-gaps.", err=True)
                 raise typer.Exit(code=2)
-            llm = CachedLLM(cache, DeepSeekClient(key))
+            llm = CachedLLM(cache, DeepSeekClient(key), on_event=tally)
 
             def make_graph():
                 # One news store per worker: its connection serves one run at a time.
@@ -343,11 +348,19 @@ def batch(
     counts = {
         status: sum(r.status == status for r in results) for status in ("ok", "failed", "error")
     }
-    totals, cost = batching.estimated_cost(results)
     console.print(f"ok {counts['ok']}, failed {counts['failed']}, broke off {counts['error']}")
-    for model, (used_in, used_out) in sorted(totals.items()):
-        console.print(f"  {model}: {used_in:,} in, {used_out:,} out")
-    console.print(f"  about ${cost:.2f} at peak list prices if nothing had been cached")
+    llm_usage, jev_usage = tally.snapshot()
+    for model, u in llm_usage.items():
+        console.print(
+            f"  {model}: {u.new_calls} new calls ({u.new_in:,} in, {u.new_out:,} out), "
+            f"{u.cached_calls} cached"
+        )
+    if jev_usage.new_calls or jev_usage.cached_calls:
+        console.print(
+            f"  Jev: {jev_usage.new_calls} new calls ({jev_usage.new_in:,} in), "
+            f"{jev_usage.cached_calls} cached"
+        )
+    console.print(f"  spent {costs.spend(tally, started, datetime.now(UTC)).describe()}")
     console.print(f"results in {batching.run_dir(out_dir, config)}")
     if counts["error"]:
         typer.echo("Some runs broke off. Rerun to continue.", err=True)
