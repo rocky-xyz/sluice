@@ -129,12 +129,14 @@ def agreement(a: list[Row], b: list[Row]) -> tuple[int, float | None]:
     return len(both), sum(x == y for x, y in both) / len(both) if both else None
 
 
-def past_excess(prices: PriceStore, ticker: str, day: date) -> float | None:
-    """Log return over SPY from the close LOOKBACK trading days back to `day`'s close."""
+def past_excess(
+    prices: PriceStore, ticker: str, day: date, lookback: int = LOOKBACK
+) -> float | None:
+    """Log return over SPY from the close `lookback` trading days back to `day`'s close."""
 
     def log_return(symbol: str) -> float | None:
-        bars = prices.history(symbol, through=day, limit=LOOKBACK + 1)
-        if len(bars) < LOOKBACK + 1 or bars[-1].day != day:
+        bars = prices.history(symbol, through=day, limit=lookback + 1)
+        if len(bars) < lookback + 1 or bars[-1].day != day:
             return None
         return math.log(bars[-1].close / bars[0].close)
 

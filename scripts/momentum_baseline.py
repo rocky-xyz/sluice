@@ -1,0 +1,418 @@
+"""Are the pipeline's ratings mostly a restatement of the recent move? (H1)
+
+docs/specs/11-momentum-baseline.md. A one-line momentum baseline (the stock's
+log excess return over SPY in the N trading days to the decision close) is set
+beside each config's ratings on the validation segment:
+- restatement: Spearman of rating score and the 10-day past excess;
+- forward Spearman of the rating and of the baseline against the label, and
+  their difference;
+- hit rate, the baseline cut into bullish / hold / bearish in the same shares
+  as the config's ratings;
+- partial correlation of rating and label once the past excess is taken out
+  of both, ranks regressed on its rank within each unit.
+
+A unit is one decision day and one repeat. Correlations are taken within a
+unit, over its stocks, then averaged over units. Intervals resample whole
+decision days, 1000 times; the two sides of a difference share the draws.
+The label is the frozen one of sluice.evaluation.quality, and only validation
+runs are read (load_decisions refuses the sealed segments). Prices are read
+from the stores as they are, never fetched.
+
+Usage:
+    python -m scripts.momentum_baseline [--config v1 --config v2 --config v3] [--out ...]
+"""
+
+import argparse
+import statistics
+import zlib
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from pathlib import Path
+
+import numpy as np
+
+from scripts.compare_baseline import EXTERNAL, past_excess, spearman
+from sluice.agents.batch import run_dir
+from sluice.agents.config import load_config
+from sluice.evaluation import quality
+from sluice.evaluation.decisions import load_decisions
+from sluice.prices.store import PriceStore
+
+WINDOWS = (5, 10, 20)  # trading days of past excess; 10 is the label's own length
+MAIN = 10
+RESAMPLES = 1000
+MIN_STOCKS = 3  # fewer in a unit and its correlations are not taken
+CONFIGS = ("v1", "v2", "v3")
+
+
+@dataclass(frozen=True)
+class Cell:
+    ticker: str
+    day: date
+    repeat: int
+    score: int  # quality.SCORES of the rating
+    label: float
+    past: dict[int, float] = field(hash=False)  # window -> past excess
+
+
+@dataclass(frozen=True)
+class Counts:
+    runs: int
+    failed: int
+    unlabelled: int  # successful runs whose label is not known
+    no_past: int  # successful, labelled runs missing a past excess in some window
+
+
+def load_cells(
+    folder: Path,
+    prices: PriceStore,
+    now: datetime,
+    past: Callable[[str, date, int], float | None],
+) -> tuple[list[Cell], Counts]:
+    """The validation runs of one run directory that have a rating, a label and every past."""
+    decisions = load_decisions(folder, "validation")
+    cells, failed, unlabelled, no_past = [], 0, 0, 0
+    for item in quality.label_decisions(decisions, prices, now):
+        d = item.decision
+        if d.rating is None:
+            failed += 1
+            continue
+        if item.label is None:
+            unlabelled += 1
+            continue
+        values = {n: past(d.ticker, d.day, n) for n in WINDOWS}
+        if any(v is None for v in values.values()):
+            no_past += 1
+            continue
+        cells.append(Cell(d.ticker, d.day, d.repeat, quality.SCORES[d.rating], item.label, values))
+    return cells, Counts(len(decisions), failed, unlabelled, no_past)
+
+
+def units(cells: list[Cell]) -> dict[tuple[date, int], list[Cell]]:
+    grouped: dict[tuple[date, int], list[Cell]] = defaultdict(list)
+    for c in cells:
+        grouped[c.day, c.repeat].append(c)
+    return dict(sorted(grouped.items()))
+
+
+# A measure is kept as (numerator, denominator) per decision day, so that a
+# resample of days only has to add them up. A mean over units is (sum of the
+# units' values, number of units with a value); a hit rate is (hits, ratings
+# with a direction).
+Parts = dict[date, tuple[float, int]]
+
+
+def _add(parts: Parts, day: date, num: float, den: int) -> None:
+    old = parts.get(day, (0.0, 0))
+    parts[day] = (old[0] + num, old[1] + den)
+
+
+def unit_mean(cells: list[Cell], value: Callable[[list[Cell]], float | None]) -> Parts:
+    """Every day's (sum, count) of a per-unit value; a unit without one is left out, not 0."""
+    parts: Parts = {}
+    for (day, _), group in units(cells).items():
+        v = value(group) if len(group) >= MIN_STOCKS else None
+        _add(parts, day, 0.0 if v is None else v, 0 if v is None else 1)
+    return parts
+
+
+def rank_correlation(x: Callable[[Cell], float], y: Callable[[Cell], float]):
+    return lambda group: spearman([(x(c), y(c)) for c in group])
+
+
+def score(c: Cell) -> float:
+    return c.score
+
+
+def label(c: Cell) -> float:
+    return c.label
+
+
+def past_of(n: int) -> Callable[[Cell], float]:
+    return lambda c: c.past[n]
+
+
+def _residuals(ys: list[float], xs: list[float]) -> list[float] | None:
+    """Least-squares residuals of ys on a line in xs; None when xs do not vary."""
+    mx, my = statistics.mean(xs), statistics.mean(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx == 0:
+        return None
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / sxx
+    return [y - my - slope * (x - mx) for x, y in zip(xs, ys, strict=True)]
+
+
+def partial(n: int) -> Callable[[list[Cell]], float | None]:
+    """Rank correlation of rating and label once the rank of the n-day past is taken out."""
+
+    def value(group: list[Cell]) -> float | None:
+        rp = quality._rank([c.past[n] for c in group])
+        rs = _residuals(quality._rank([c.score for c in group]), rp)
+        ry = _residuals(quality._rank([c.label for c in group]), rp)
+        if rs is None or ry is None:
+            return None
+        if max(map(abs, rs)) < 1e-12 or max(map(abs, ry)) < 1e-12:
+            return None  # one side is all explained by the past: nothing left to correlate
+        return statistics.correlation(rs, ry)
+
+    return value
+
+
+def matched_tiers(cells: list[Cell], n: int) -> dict[Cell, int]:
+    """The baseline's direction per cell: the highest n-day past bullish, the lowest bearish,
+    in the same numbers as the ratings; ties are settled by ticker, day and repeat."""
+    bullish = sum(c.score > 0 for c in cells)
+    bearish = sum(c.score < 0 for c in cells)
+    order = sorted(cells, key=lambda c: (-c.past[n], c.ticker, c.day, c.repeat))
+    tiers = dict.fromkeys(order, 0)
+    for c in order[:bullish]:
+        tiers[c] = 1
+    for c in order[len(order) - bearish :]:
+        tiers[c] = -1
+    return tiers
+
+
+def hits(cells: list[Cell], direction: Callable[[Cell], int]) -> Parts:
+    """Every day's (hits, ratings with a direction): hold is left out, as in quality."""
+    parts: Parts = {}
+    for c in cells:
+        if (s := direction(c)) != 0:
+            _add(parts, c.day, float((s > 0) == (c.label > 0)), 1)
+    return parts
+
+
+def value(parts: Parts) -> float | None:
+    num = sum(n for n, _ in parts.values())
+    den = sum(d for _, d in parts.values())
+    return num / den if den else None
+
+
+@dataclass(frozen=True)
+class Estimate:
+    value: float | None
+    low: float | None = None  # 95% interval by resampling decision days
+    high: float | None = None
+
+
+@dataclass(frozen=True)
+class Paired:
+    llm: Estimate
+    baseline: Estimate
+    difference: Estimate  # llm - baseline, the two from the same draws
+
+
+def _arrays(parts: Parts, days: list[date]) -> tuple[np.ndarray, np.ndarray]:
+    return (
+        np.array([parts.get(d, (0.0, 0))[0] for d in days]),
+        np.array([parts.get(d, (0.0, 0))[1] for d in days]),
+    )
+
+
+def _draws(days: list[date], seed: str) -> np.ndarray:
+    rng = np.random.default_rng(zlib.crc32(seed.encode()))
+    return rng.integers(0, len(days), size=(RESAMPLES, len(days)))
+
+
+def _resampled(parts: Parts, days: list[date], picks: np.ndarray) -> np.ndarray:
+    """The measure in every draw; NaN in a draw with nothing to divide by."""
+    nums, dens = _arrays(parts, days)
+    num, den = nums[picks].sum(axis=1), dens[picks].sum(axis=1)
+    return np.divide(num, den, out=np.full(len(num), np.nan), where=den > 0)
+
+
+def _interval(draws: np.ndarray) -> tuple[float | None, float | None]:
+    if np.isnan(draws).all():
+        return None, None
+    return float(np.nanpercentile(draws, 2.5)), float(np.nanpercentile(draws, 97.5))
+
+
+def estimate(parts: Parts, days: list[date], seed: str | None) -> Estimate:
+    """The measure, with its interval unless `seed` is None."""
+    if seed is None:
+        return Estimate(value(parts))
+    return Estimate(value(parts), *_interval(_resampled(parts, days, _draws(days, seed))))
+
+
+def paired(llm: Parts, baseline: Parts, days: list[date], seed: str | None) -> Paired:
+    a, b = value(llm), value(baseline)
+    gap = None if a is None or b is None else a - b
+    if seed is None:
+        return Paired(Estimate(a), Estimate(b), Estimate(gap))
+    picks = _draws(days, seed)
+    da, db = _resampled(llm, days, picks), _resampled(baseline, days, picks)
+    return Paired(
+        Estimate(a, *_interval(da)), Estimate(b, *_interval(db)), Estimate(gap, *_interval(da - db))
+    )
+
+
+@dataclass(frozen=True)
+class Result:
+    name: str
+    counts: Counts
+    cells: int
+    units: int  # day x repeat
+    days: int
+    directional: int  # ratings that are not hold; the baseline has as many
+    restatement: Estimate
+    forward: dict[int, Paired]
+    hit_rate: dict[int, Paired]
+    partial: dict[int, Estimate]
+
+
+def analyse(name: str, cells: list[Cell], counts: Counts, intervals: bool = True) -> Result:
+    days = sorted({c.day for c in cells})
+
+    def seed(measure: str) -> str | None:
+        return f"{name}|{measure}" if intervals else None
+
+    forward, hit_rate, part = {}, {}, {}
+    rated = hits(cells, lambda c: c.score)
+    for n in WINDOWS:
+        forward[n] = paired(
+            unit_mean(cells, rank_correlation(score, label)),
+            unit_mean(cells, rank_correlation(past_of(n), label)),
+            days,
+            seed(f"forward|{n}"),
+        )
+        tiers = matched_tiers(cells, n)
+        hit_rate[n] = paired(rated, hits(cells, tiers.__getitem__), days, seed(f"hits|{n}"))
+        part[n] = estimate(unit_mean(cells, partial(n)), days, seed(f"partial|{n}"))
+    return Result(
+        name=name,
+        counts=counts,
+        cells=len(cells),
+        units=len(units(cells)),
+        days=len(days),
+        directional=sum(c.score != 0 for c in cells),
+        restatement=estimate(
+            unit_mean(cells, rank_correlation(score, past_of(MAIN))), days, seed("restatement")
+        ),
+        forward=forward,
+        hit_rate=hit_rate,
+        partial=part,
+    )
+
+
+def _num(e: Estimate, pct: bool = False) -> str:
+    if e.value is None:
+        return "-"
+    fmt = (lambda x: f"{x:.1%}") if pct else (lambda x: f"{x:+.3f}")
+    if e.low is None or e.high is None:
+        return fmt(e.value)
+    return f"{fmt(e.value)}（{fmt(e.low)} 至 {fmt(e.high)}）"
+
+
+def _counts(r: Result) -> str:
+    c = r.counts
+    return (
+        f"运行 {c.runs}，失败 {c.failed}，标签未知 {c.unlabelled}，缺过去超额 {c.no_past}；"
+        f"用到 {r.cells} 格、{r.units} 个单元、{r.days} 个决策日，有方向的评级 {r.directional} 个。"
+    )
+
+
+def render_validation(results: list[Result], skipped: list[str]) -> list[str]:
+    lines = [
+        "# H1：评级是否只是在复述最近的涨跌",
+        "",
+        (
+            "验证期。标签：下一个开盘起 10 个交易日相对 SPY 的对数超额收益。"
+            "动量基线：决策日收盘前 N 个交易日相对 SPY 的对数超额。"
+            "单元 = 一个决策日 × 一次重复；相关在单元内的股票之间算，再对单元取平均。"
+            f"括号里是按决策日整天重抽样 {RESAMPLES} 次的 95% 区间。"
+        ),
+        "",
+    ]
+    if skipped:
+        lines += [f"跳过（没有验证期运行）：{', '.join(skipped)}", ""]
+    for r in results:
+        f, h = r.forward[MAIN], r.hit_rate[MAIN]
+        lines += [
+            f"## {r.name}",
+            "",
+            _counts(r),
+            "",
+            "| 度量 | LLM 评级 | 动量基线（10 日） | 差值（LLM − 基线） |",
+            "|---|---|---|---|",
+            f"| 复述程度：评级 vs 过去 10 日超额 | {_num(r.restatement)} | | |",
+            f"| 向前 Spearman | {_num(f.llm)} | {_num(f.baseline)} | {_num(f.difference)} |",
+            (
+                f"| 命中率（基线按比例分档） | {_num(h.llm, True)} | {_num(h.baseline, True)} "
+                f"| {_num(h.difference, True)} |"
+            ),
+            f"| 偏相关：去掉过去 10 日超额后 | {_num(r.partial[MAIN])} | | |",
+            "",
+        ]
+    lines += [
+        "## 稳健性：过去 5 / 10 / 20 日",
+        "",
+        "| 配置 | 窗口 | 基线向前 Spearman | LLM − 基线 | 基线命中率 | 偏相关 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in results:
+        for n in WINDOWS:
+            f, h = r.forward[n], r.hit_rate[n]
+            lines.append(
+                f"| {r.name} | {n} | {_num(f.baseline)} | {_num(f.difference)} "
+                f"| {_num(h.baseline, True)} | {_num(r.partial[n])} |"
+            )
+    return lines + [""]
+
+
+def render_external(r: Result) -> list[str]:
+    f, h = r.forward[MAIN], r.hit_rate[MAIN]
+    return [
+        "## 原版 TradingAgents（初筛 5 天，只给点估计）",
+        "",
+        _counts(r),
+        "",
+        "| 度量 | LLM 评级 | 动量基线（10 日） |",
+        "|---|---|---|",
+        f"| 复述程度 | {_num(r.restatement)} | |",
+        f"| 向前 Spearman | {_num(f.llm)} | {_num(f.baseline)} |",
+        f"| 命中率 | {_num(h.llm, True)} | {_num(h.baseline, True)} |",
+        f"| 偏相关 | {_num(r.partial[MAIN])} | |",
+        "",
+    ]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--config", action="append", help="Pipeline config; may repeat.")
+    parser.add_argument("--runs", type=Path, default=Path("data/local/runs"))
+    parser.add_argument("--out", type=Path, default=Path("data/local/evaluation/h1-momentum.md"))
+    args = parser.parse_args()
+
+    now = datetime.now(UTC)
+    results, skipped, external = [], [], None
+    with PriceStore() as prices:  # no fetch: read what is stored, skip what is not
+        cache: dict[tuple[str, date, int], float | None] = {}
+
+        def past(ticker: str, day: date, n: int) -> float | None:
+            if (ticker, day, n) not in cache:
+                cache[ticker, day, n] = past_excess(prices, ticker, day, n)
+            return cache[ticker, day, n]
+
+        for name in args.config or CONFIGS:
+            folder = run_dir(args.runs, load_config(name))
+            cells, counts = load_cells(folder, prices, now, past)
+            if not cells:
+                skipped.append(folder.name)
+                continue
+            results.append(analyse(folder.name, cells, counts))
+        if (args.runs / EXTERNAL).is_dir():
+            cells, counts = load_cells(args.runs / EXTERNAL, prices, now, past)
+            if cells:
+                external = analyse(EXTERNAL, cells, counts, intervals=False)
+    lines = render_validation(results, skipped)
+    lines += render_external(external) if external else [f"{EXTERNAL}：没有运行结果。", ""]
+    report = "\n".join(lines)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(report)
+    print(report)
+    print(f"written to {args.out}")
+
+
+if __name__ == "__main__":
+    main()
