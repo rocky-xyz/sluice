@@ -70,6 +70,7 @@ sluice/
   fundamentals/ quarterly statements from Alpha Vantage, archived as fetched
   scoring/      versioned question specs, scorer client, score cache
   agents/       multi-agent pipeline: graph, state, roles, tools, tool loop, LLM client
+  session/      the terminal session: welcome, questions, live panel, report
   patterns/     candlestick rules, pivots, weekly bars, event study, get_patterns
   sizing/       regime detection, weighting, position sizing, risk caps
   evaluation/   portfolio backtest, metrics, data splits, calibration (frozen)
@@ -95,6 +96,7 @@ below assume it is active.
 ## Usage
 
 ```bash
+sluice                                   # in a terminal: pick a ticker, a moment and a config, watch it run
 sluice --version
 sluice news collect                      # fetch recent Yahoo Finance news for the universe
 sluice news collect --tickers NVDA,AMD   # or for chosen tickers
@@ -105,10 +107,6 @@ sluice news resolve-publishers           # read the publisher named on Yahoo-hos
 sluice news import                       # rebuild the store from the raw archive
 sluice news fit-weights                  # fit and save one source/event-type weight table per month
 sluice fundamentals fetch                # quarterly statements from Alpha Vantage (resumable; 25 calls a day)
-sluice analyze NVDA --date 2026-09-30    # run the pipeline as of that day's close (needs DEEPSEEK_API_KEY)
-sluice analyze TSLA                      # or as of now, for any ticker: collects its news first
-sluice configure                         # tick analysts, indicators, debate depth, news weighting: writes a new config
-sluice analyze NVDA --date 2026-09-30 --config market-news   # run a config written that way
 sluice batch                             # backtest the universe on every tenth trading day (resumable)
 sluice batch --config v2                 # the same with weighted news (needs TYPESAFE_API_KEY and fit-weights)
 sluice score                             # score stored news with Jev (needs TYPESAFE_API_KEY; resumable)
@@ -150,7 +148,20 @@ collection runs in a separate private data repository,
 cloned to `data/`; items collected by hand are archived under `data/local/` so
 they never conflict with it.
 
-`analyze` runs the pipeline for one ticker. Code fetches what was known at the
+`sluice` on its own, in a terminal, is the way to run the pipeline for one
+ticker (it needs `DEEPSEEK_API_KEY`). After a welcome page it asks for a ticker,
+whether to decide now or at a past close, and a config; "New..." in that list
+ticks analysts, market indicators, debate depth and news weighting, and writes
+them as a new config first. While the run goes, a live panel shows each step's
+status and time, every model call with its tokens, the latest finished report,
+and a footer with calls, tokens, elapsed time and the dollars spent so far:
+DeepSeek at its peak or off-peak price by the hour in Beijing, Jev at its rate,
+cached answers free. A terminal smaller than 80x24 gets one line per event
+instead. Afterwards it prints the inputs, the analysts' reports, the debate and
+the decision, and saves the full run state as JSON under `data/local/sessions/`.
+Outside a terminal, `sluice` only prints the help.
+
+The pipeline itself: code fetches what was known at the
 decision time; a market analyst, a news analyst and a fundamentals analyst each
 write a report that cites its sources by id, side by side; a bullish and a
 bearish debater argue from those reports for a configured number of rounds; and
@@ -159,15 +170,14 @@ list. Only the analysts see the data. Answers that cite an id that was never
 given, or that no report cites, are rejected and asked again. The pipeline
 extracts and weighs information; it does not size positions.
 
-With `--date` the run is a backtest that decides at that trading day's close
-and touches no network except the model. Without it the run is ad hoc: it
+A run at a past close is a backtest that decides at that trading day's close
+and touches no network except the model. A run decided now is ad hoc: it
 decides now, first collects the ticker's news from Yahoo Finance and, if none
 are stored, its statements from Alpha Vantage (three calls), and uses the last
 finished trading day's prices. Both use the same graph, roles and config. A
 ticker outside the studied universe is marked as having no backtest evidence. Model calls
 are cached in `data/local/llm_cache.db` and each run is checkpointed, so
-repeating a finished run costs nothing; `--out` writes the full run state as
-JSON. Models, prompts and limits live in `configs/pipeline/`, one file per
+repeating a finished run costs nothing. Models, prompts and limits live in `configs/pipeline/`, one file per
 version.
 
 `batch` runs the backtest over a grid: by default the eleven companies of the
