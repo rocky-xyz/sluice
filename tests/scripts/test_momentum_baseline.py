@@ -2,32 +2,42 @@ import json
 import math
 import statistics
 from datetime import UTC, date, datetime, timedelta
+from itertools import pairwise
 
 import numpy as np
 import pytest
 
 from scripts.compare_baseline import past_excess
 from scripts.momentum_baseline import (
+    CUTOFF,
     MAIN,
+    MIN_UNIVERSE,
     RESAMPLES,
+    STEP,
     WINDOWS,
     Cell,
     Counts,
     _draws,
     _resampled,
     analyse,
+    cross_sections,
+    decision_days,
     hits,
     label,
     load_cells,
+    load_points,
     matched_tiers,
     partial,
     past_of,
+    periods,
+    points,
     rank_correlation,
     score,
     unit_mean,
     value,
 )
 from sluice.evaluation import quality
+from sluice.evaluation.split import TEST_1
 from sluice.market_calendar import close_of
 from sluice.prices.store import Bar, PriceStore
 
@@ -219,3 +229,82 @@ def test_the_past_does_not_change_when_later_bars_are_added(tmp_path):
     with _store(tmp_path / "a", D1) as short, _store(tmp_path / "b", date(2026, 5, 29)) as long:
         for n in WINDOWS:
             assert past_excess(short, "NVDA", D1, n) == past_excess(long, "NVDA", D1, n)
+
+
+# The S&P 500 check.
+
+
+def _series(days: list[date], before: float, after: float, turn: date) -> list[Bar]:
+    """Closes growing by `before` a day up to `turn`, by `after` from then; opens equal closes."""
+    bars, price = [], 100.0
+    for d in days:
+        bars.append(Bar(day=d, open=price, close=price, raw_close=price, volume=1))
+        price *= before if d < turn else after
+    return bars
+
+
+def test_decision_days_are_every_tenth_session_after_the_longest_window():
+    sessions = _sessions(date(2026, 1, 2), date(2026, 6, 30))
+    days = decision_days(sessions)
+    assert days[0] == sessions[max(WINDOWS)]
+    assert all(sessions.index(b) - sessions.index(a) == STEP for a, b in pairwise(days))
+    assert CUTOFF == TEST_1[0]
+
+
+def test_points_follow_the_pattern_study_label_and_the_past_to_the_close():
+    sessions = _sessions(date(2026, 1, 2), date(2026, 6, 30))
+    day = sessions[40]
+    spy = {b.day: b for b in _series(sessions, 1.001, 1.001, day)}
+    found = points(_series(sessions, 1.003, 0.998, day), spy, [day], CUTOFF)
+    past, label = found[day]
+    # Rising 0.3% a day to the decision close, falling 0.2% a day after it.
+    assert past == pytest.approx({n: n * (math.log(1.003) - math.log(1.001)) for n in WINDOWS})
+    assert label == pytest.approx(9 * (math.log(0.998) - math.log(1.001)))
+
+
+def test_a_label_settling_on_or_after_the_cutoff_is_not_used():
+    sessions = _sessions(date(2026, 5, 1), date(2026, 9, 30))
+    spy = {b.day: b for b in _series(sessions, 1.0, 1.0, sessions[0])}
+    bars = _series(sessions, 1.001, 1.001, sessions[0])
+    found = points(bars, spy, sessions[max(WINDOWS) :], CUTOFF)
+    last = max(found)
+    exit_of_last = sessions[sessions.index(last) + quality.HORIZON]
+    assert exit_of_last < CUTOFF <= sessions[sessions.index(last) + 1 + quality.HORIZON]
+
+
+def test_no_bar_from_the_cutoff_on_is_read(tmp_path):
+    sessions = _sessions(date(2026, 1, 2), date(2026, 9, 30))
+    with PriceStore(tmp_path / "p.db") as store:
+        store.replace("SPY", _series(sessions, 1.0, 1.0, sessions[0]))
+        store.replace("AAA", _series(sessions, 1.001, 1.001, sessions[0]))
+        days, found = load_points(store, ["AAA", "ZZZ"], CUTOFF)
+    assert max(days) < CUTOFF and set(found) == {"AAA"}  # ZZZ has no prices
+    assert all(d < CUTOFF for d in found["AAA"])
+
+
+def _cross_section(rates: list[tuple[float, float]], turn_at: int = 40):
+    sessions = _sessions(date(2026, 1, 2), date(2026, 6, 30))
+    day = sessions[turn_at]
+    spy = {b.day: b for b in _series(sessions, 1.0, 1.0, day)}
+    by_ticker = {
+        f"T{k}": points(_series(sessions, before, after, day), spy, [day], CUTOFF)
+        for k, (before, after) in enumerate(rates)
+    }
+    return day, by_ticker
+
+
+def test_a_cross_section_shows_reversal_as_a_negative_spearman():
+    day, by_ticker = _cross_section([(1.001, 1.003), (1.002, 1.002), (1.003, 1.001)])
+    parts = cross_sections(by_ticker, [day], minimum=3)
+    assert all(parts[n] == {day: (pytest.approx(-1.0), 1)} for n in WINDOWS)
+    assert cross_sections(by_ticker, [day], minimum=4)[MAIN] == {day: (0.0, 0)}  # too few
+    assert MIN_UNIVERSE == 30
+
+
+def test_periods_split_by_year_and_the_validation_segment():
+    day, by_ticker = _cross_section([(1.001, 1.003), (1.002, 1.002), (1.003, 1.001)])
+    parts = cross_sections(by_ticker, [day], minimum=3)
+    rows = periods(parts, by_ticker, "test")
+    assert [r.name for r in rows] == ["全部", "2026", "验证期"]
+    assert all(r.days == 1 and r.stocks == 3 for r in rows)
+    assert rows[0].windows[MAIN].value == pytest.approx(-1.0)

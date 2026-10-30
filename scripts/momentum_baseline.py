@@ -18,17 +18,25 @@ The label is the frozen one of sluice.evaluation.quality, and only validation
 runs are read (load_decisions refuses the sealed segments). Prices are read
 from the stores as they are, never fetched.
 
+Beyond the validation runs: over the S&P 500 price store of the pattern study,
+on every 10th SPY session from 2016, the cross-sectional Spearman of the past
+excess against the same label (next open to the 10th session's close, as the
+pattern study's), to see whether short-term reversal is general. Only
+decision days whose label settles before test segment 1 opens are used, and no
+bar from that day on is read. The members are today's (survivors).
+
 Usage:
     python -m scripts.momentum_baseline [--config v1 --config v2 --config v3] [--out ...]
 """
 
 import argparse
+import math
 import statistics
 import zlib
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -38,13 +46,21 @@ from sluice.agents.batch import run_dir
 from sluice.agents.config import load_config
 from sluice.evaluation import quality
 from sluice.evaluation.decisions import load_decisions
-from sluice.prices.store import PriceStore
+from sluice.evaluation.split import TEST_1, VALIDATION
+from sluice.patterns import universe
+from sluice.patterns.prices import DEFAULT_DB as PATTERN_DB
+from sluice.patterns.study import _log_excess
+from sluice.prices.store import Bar, PriceStore
+from sluice.universe import COMPANIES
 
 WINDOWS = (5, 10, 20)  # trading days of past excess; 10 is the label's own length
 MAIN = 10
 RESAMPLES = 1000
 MIN_STOCKS = 3  # fewer in a unit and its correlations are not taken
 CONFIGS = ("v1", "v2", "v3")
+STEP = 10  # sessions between decision days of the S&P 500 check: labels do not overlap
+CUTOFF = TEST_1[0]  # labels there must settle before test segment 1 opens
+MIN_UNIVERSE = 30  # fewer stocks on a day of the whole index and the day is left out
 
 
 @dataclass(frozen=True)
@@ -377,11 +393,133 @@ def render_external(r: Result) -> list[str]:
     ]
 
 
+# The S&P 500 check.
+
+Point = tuple[dict[int, float], float]  # past excess per window, label
+
+
+def decision_days(sessions: list[date]) -> list[date]:
+    """Every STEP-th session, from the first with the longest past window behind it."""
+    return sessions[max(WINDOWS) :: STEP]
+
+
+def points(
+    bars: list[Bar], spy: dict[date, Bar], days: list[date], cutoff: date
+) -> dict[date, Point]:
+    """One stock's past excess and label on each decision day it has the data for."""
+    index = {b.day: i for i, b in enumerate(bars)}
+    found = {}
+    for day in days:
+        i = index.get(day)
+        if i is None or i < max(WINDOWS):
+            continue
+        labelled = _log_excess(bars, spy, i, quality.HORIZON)
+        if labelled is None or labelled[0] >= cutoff:
+            continue
+        past = {}
+        for n in WINDOWS:
+            start, end = bars[i - n], bars[i]
+            s_start, s_end = spy.get(start.day), spy.get(end.day)
+            if s_start is None or s_end is None or min(start.close, s_start.close) <= 0:
+                break
+            past[n] = math.log(end.close / start.close) - math.log(s_end.close / s_start.close)
+        else:
+            found[day] = (past, labelled[1])
+    return found
+
+
+def cross_sections(
+    by_ticker: dict[str, dict[date, Point]], days: list[date], minimum: int
+) -> dict[int, Parts]:
+    """Per window, each decision day's Spearman of past excess and label over the stocks."""
+    parts: dict[int, Parts] = {n: {} for n in WINDOWS}
+    for day in days:
+        here = [found[day] for found in by_ticker.values() if day in found]
+        for n in WINDOWS:
+            rho = spearman([(past[n], y) for past, y in here]) if len(here) >= minimum else None
+            parts[n][day] = (0.0, 0) if rho is None else (rho, 1)
+    return parts
+
+
+def load_points(
+    store: PriceStore, tickers: list[str], cutoff: date
+) -> tuple[list[date], dict[str, dict[date, Point]]]:
+    """Decision days and every ticker's points, from bars before `cutoff` only."""
+    through = cutoff - timedelta(days=1)
+    spy_bars = store.history("SPY", through, 4000)
+    spy = {b.day: b for b in spy_bars}
+    days = decision_days([b.day for b in spy_bars])
+    found = {t: points(store.history(t, through, 4000), spy, days, cutoff) for t in tickers}
+    return days, {t: f for t, f in found.items() if f}
+
+
+@dataclass(frozen=True)
+class Period:
+    name: str
+    days: int  # decision days with a value
+    stocks: float  # mean stocks per such day
+    windows: dict[int, Estimate]
+
+
+def periods(
+    parts: dict[int, Parts], by_ticker: dict[str, dict[date, Point]], label: str
+) -> list[Period]:
+    """The whole span, each year, and the validation segment."""
+    spans = [("全部", lambda d: True)]
+    years = sorted({d.year for d, (_, n) in parts[MAIN].items() if n})
+    spans += [(str(y), lambda d, y=y: d.year == y) for y in years]
+    spans.append(("验证期", lambda d: VALIDATION[0] <= d <= VALIDATION[1]))
+    rows = []
+    for name, keep in spans:
+        valued = [d for d, (_, n) in parts[MAIN].items() if n and keep(d)]
+        if not valued:
+            continue
+        windows = {
+            n: estimate(
+                {d: v for d, v in parts[n].items() if keep(d)}, valued, f"sp500|{label}|{name}|{n}"
+            )
+            for n in WINDOWS
+        }
+        stocks = statistics.mean(sum(d in f for f in by_ticker.values()) for d in valued)
+        rows.append(Period(name, len(valued), stocks, windows))
+    return rows
+
+
+def render_sp500(tables: dict[str, list[Period]], missing: list[str], cutoff: date) -> list[str]:
+    lines = [
+        "## 标普 500：过去超额与之后 10 日超额（短期反转是否普遍）",
+        "",
+        (
+            f"从 2016 年起每隔 {STEP} 个交易日取一个决策日；每个决策日在股票之间算"
+            "过去 N 日超额与之后 10 日超额（下一个开盘到第 10 个交易日收盘，减 SPY）的 Spearman，"
+            "再对决策日取平均，括号里是按决策日重抽样的 95% 区间。负数表示短期反转。"
+            f"只用标签在 {cutoff} 之前结算的决策日。成分股是 2026-10 的名单（幸存者偏差）。"
+        ),
+        "",
+    ]
+    if missing:
+        lines += [f"价格库里没有：{', '.join(missing)}", ""]
+    for name, rows in tables.items():
+        lines += [
+            f"### {name}",
+            "",
+            "| 时期 | 决策日 | 平均股票数 | 过去 5 日 | 过去 10 日 | 过去 20 日 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in rows:
+            cells = " | ".join(_num(r.windows[n]) for n in WINDOWS)
+            lines.append(f"| {r.name} | {r.days} | {r.stocks:.0f} | {cells} |")
+        lines.append("")
+    return lines
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", action="append", help="Pipeline config; may repeat.")
     parser.add_argument("--runs", type=Path, default=Path("data/local/runs"))
     parser.add_argument("--out", type=Path, default=Path("data/local/evaluation/h1-momentum.md"))
+    parser.add_argument("--patterns-db", type=Path, default=PATTERN_DB)
+    parser.add_argument("--universe", default="sp500-2026-10")
     args = parser.parse_args()
 
     now = datetime.now(UTC)
@@ -407,6 +545,22 @@ def main() -> None:
                 external = analyse(EXTERNAL, cells, counts, intervals=False)
     lines = render_validation(results, skipped)
     lines += render_external(external) if external else [f"{EXTERNAL}：没有运行结果。", ""]
+    if args.patterns_db.exists():
+        with PriceStore(args.patterns_db) as store:
+            members = universe.load(args.universe)  # TSM, an ADR, is not one of them
+            days, found = load_points(store, sorted({*members, *COMPANIES}), CUTOFF)
+        everyone = {t: f for t, f in found.items() if t in members}
+        ours = {t: f for t, f in found.items() if t in COMPANIES}
+        tables = {
+            f"全部（{len(everyone)} 只）": periods(
+                cross_sections(everyone, days, MIN_UNIVERSE), everyone, "all"
+            ),
+            f"项目的 {len(ours)} 只": periods(cross_sections(ours, days, MIN_STOCKS), ours, "ours"),
+        }
+        missing = sorted(set(COMPANIES) - set(ours))
+        lines += render_sp500(tables, missing, CUTOFF)
+    else:
+        lines += [f"标普 500 价格库不存在：{args.patterns_db}", ""]
     report = "\n".join(lines)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(report)
