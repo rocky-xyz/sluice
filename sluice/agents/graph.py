@@ -10,7 +10,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from sluice.agents import loop, roles
+from sluice.agents import events, loop, roles
 from sluice.agents.config import PipelineConfig
 from sluice.agents.llm import CachedLLM
 from sluice.agents.prefetch import Weighting, prefetch
@@ -51,6 +51,7 @@ class Deps:
     collect_news: Callable[[str], str | None] | None = None
     fetch_statements: Callable[[str], str | None] | None = None
     weighting: Weighting | None = None
+    on_event: events.OnEvent | None = None  # nodes report start and finish (docs/specs/12)
 
 
 def build_graph(
@@ -177,14 +178,20 @@ def build_graph(
         role: node for role, node in every_analyst.items() if roles.ANALYSTS[role] in chosen
     }
     graph = StateGraph(PipelineState)
-    graph.add_node("prefetch", prefetch_node)
-    graph.add_node("analysts_done", analysts_done_node)
-    graph.add_node(roles.BULL, bull_node)
-    graph.add_node(roles.BEAR, bear_node)
-    graph.add_node(roles.RESEARCH_MANAGER, research_manager_node)
+
+    def add(name: str, node: Callable[[PipelineState], dict]) -> None:
+        # Without a listener the nodes are added as they are: the graph is the one of before.
+        on_event = deps.on_event
+        graph.add_node(name, node if on_event is None else events.reporting(name, node, on_event))
+
+    add("prefetch", prefetch_node)
+    add("analysts_done", analysts_done_node)
+    add(roles.BULL, bull_node)
+    add(roles.BEAR, bear_node)
+    add(roles.RESEARCH_MANAGER, research_manager_node)
     graph.add_edge(START, "prefetch")
     for name, node in analysts.items():
-        graph.add_node(name, node)
+        add(name, node)
         graph.add_edge("prefetch", name)
     graph.add_edge(list(analysts), "analysts_done")
     graph.add_conditional_edges(
@@ -192,7 +199,7 @@ def build_graph(
     )
     graph.add_conditional_edges(roles.BULL, after_bull, [roles.BEAR, END])
     graph.add_conditional_edges(roles.BEAR, after_bear, [roles.BULL, roles.RESEARCH_MANAGER, END])
-    graph.add_node(FOLLOWUP, followup_node)
+    add(FOLLOWUP, followup_node)
     graph.add_conditional_edges(roles.RESEARCH_MANAGER, after_manager, [FOLLOWUP, END])
     graph.add_edge(FOLLOWUP, roles.RESEARCH_MANAGER)
     return graph.compile(checkpointer=checkpointer)

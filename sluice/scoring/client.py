@@ -8,6 +8,7 @@ import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 from sluice.agents.cache import CallCache
+from sluice.agents.events import JevCalled, OnEvent, emit
 
 ENV_KEY = "TYPESAFE_API_KEY"
 BASE_URL = "https://api.typesafe.ai"
@@ -151,10 +152,12 @@ class CachedJev:
         cache: CallCache,
         client: Answerer | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        on_event: OnEvent | None = None,  # told of every answer handed out (docs/specs/12)
     ) -> None:
         self._cache = cache
         self._client = client
         self._sleep = sleep
+        self._on_event = on_event
 
     def answer(self, request: JevRequest, repeat: int = 0) -> JevResponse:
         """The cached answer, or one call whose answer is then cached. Failures are not stored.
@@ -166,7 +169,9 @@ class CachedJev:
         key = cache_key(request, repeat)
         stored = self._cache.get(key)
         if stored is not None:
-            return JevResponse.model_validate_json(stored).model_copy(update={"cached": True})
+            response = JevResponse.model_validate_json(stored).model_copy(update={"cached": True})
+            self._report(response)
+            return response
         if self._client is None:
             raise JevError("not in the cache, and no client to ask")
         failures = 0
@@ -182,4 +187,11 @@ class CachedJev:
             self._cache.put(
                 key, request.model_dump_json(), response.model_dump_json(exclude={"cached"})
             )
+            self._report(response)
             return response
+
+    def _report(self, response: JevResponse) -> None:
+        emit(
+            self._on_event,
+            JevCalled(response.input_tokens, response.output_tokens, cached=response.cached),
+        )

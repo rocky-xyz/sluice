@@ -4,6 +4,7 @@ import pytest
 import requests
 
 from sluice.agents.cache import CallCache
+from sluice.agents.events import JevCalled
 from sluice.scoring.client import (
     RETRIES,
     RETRY_WAITS,
@@ -198,6 +199,15 @@ def test_second_identical_call_comes_from_the_cache(cache):
     assert client.calls == 1
     assert (first.cached, second.cached) == (False, True)
     assert second.model_copy(update={"cached": False}) == first
+
+
+def test_every_jev_answer_handed_out_is_reported_with_its_tokens(cache):
+    seen = []
+    client = FakeClient({"relevant": {"type": "noul", "noul": 0.9}})
+    model = CachedJev(cache, client, sleep=lambda _: None, on_event=seen.append)
+    model.answer(request())
+    model.answer(request())
+    assert seen == [JevCalled(40, 5, cached=False), JevCalled(40, 5, cached=True)]
 
 
 def test_a_different_repeat_is_a_new_call(cache):

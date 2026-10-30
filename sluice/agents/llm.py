@@ -8,6 +8,7 @@ import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 from sluice.agents.cache import CallCache
+from sluice.agents.events import LLMCalled, OnEvent, current_node, emit
 
 ENV_KEY = "DEEPSEEK_API_KEY"
 BASE_URL = "https://api.deepseek.com"
@@ -213,22 +214,36 @@ class CachedLLM:
         cache: CallCache,
         client: Completer | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        on_event: OnEvent | None = None,  # told of every answer handed out (docs/specs/12)
     ) -> None:
         self._cache = cache
         self._client = client
         self._sleep = sleep
+        self._on_event = on_event
 
     def complete(self, request: LLMRequest, repeat: int = 0, attempt: int = 0) -> LLMResponse:
         """The cached answer, or one call whose answer is then cached. Failures are not stored."""
         key = cache_key(request, repeat, attempt)
         stored = self._cache.get(key)
         if stored is not None:
-            return LLMResponse.model_validate_json(stored).model_copy(update={"cached": True})
-        if self._client is None:
-            raise LLMError("not in the cache, and no client to ask")
-        response = self._client.complete(request)
-        self._cache.put(
-            key, request.model_dump_json(), response.model_dump_json(exclude={"cached"})
+            response = LLMResponse.model_validate_json(stored).model_copy(update={"cached": True})
+        else:
+            if self._client is None:
+                raise LLMError("not in the cache, and no client to ask")
+            response = self._client.complete(request)
+            self._cache.put(
+                key, request.model_dump_json(), response.model_dump_json(exclude={"cached"})
+            )
+        emit(
+            self._on_event,
+            LLMCalled(
+                node=current_node(),
+                model=request.model,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cached=response.cached,
+                tools=tuple(call.name for call in response.tool_calls),
+            ),
         )
         return response
 

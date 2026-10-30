@@ -5,6 +5,7 @@ import requests
 from pydantic import BaseModel
 
 from sluice.agents.cache import CallCache
+from sluice.agents.events import LLMCalled
 from sluice.agents.llm import (
     RETRIES,
     RETRY_WAITS,
@@ -162,6 +163,27 @@ def test_second_identical_call_comes_from_the_cache(cache):
     assert client.calls == 1
     assert (first.cached, second.cached) == (False, True)
     assert second.model_copy(update={"cached": False}) == first
+
+
+def test_every_answer_handed_out_is_reported_with_its_tokens(cache):
+    seen = []
+    model = CachedLLM(cache, FakeClient("hi"), sleep=lambda _: None, on_event=seen.append)
+    model.complete(request())
+    model.complete(request())
+    assert seen == [
+        LLMCalled(None, "deepseek-flash", 10, 2, cached=False),
+        LLMCalled(None, "deepseek-flash", 10, 2, cached=True),  # the tokens it once cost
+    ]
+
+
+def test_a_failed_call_is_not_reported(cache):
+    seen = []
+    model = CachedLLM(
+        cache, FakeClient(LLMError("HTTP 401")), sleep=lambda _: None, on_event=seen.append
+    )
+    with pytest.raises(LLMError):
+        model.complete(request())
+    assert seen == []
 
 
 def test_a_different_repeat_is_a_new_call(cache):

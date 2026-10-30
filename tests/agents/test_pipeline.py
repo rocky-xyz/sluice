@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+import threading
 import warnings
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,7 @@ from sluice.agents.config import (
     PricesConfig,
     load_config,
 )
+from sluice.agents.events import LLMCalled, NodeFinished, NodeStarted
 from sluice.agents.graph import Deps, build_graph, open_checkpointer, run
 from sluice.agents.llm import CachedLLM, LLMError, LLMRequest, LLMResponse
 from sluice.agents.prefetch import (
@@ -172,7 +174,7 @@ def pipeline(
     statements = FundamentalsStore(tmp_path / "statements")
     if with_statements:
         stock(statements, "NVDA")
-    llm = CachedLLM(cache, model, sleep=lambda _: None)
+    llm = CachedLLM(cache, model, sleep=lambda _: None, on_event=extra.get("on_event"))
     return build_graph(Deps(store, prices, statements, llm, config, **extra), saver)
 
 
@@ -871,6 +873,93 @@ def test_an_interrupted_debate_continues_with_the_next_turn(stocked, tmp_path):
     assert [(t.round, t.side) for t in state["debate"]] == [
         (1, "bull"), (1, "bear"), (2, "bull"), (2, "bear"),
     ]  # fmt: skip
+
+
+# --- events for the live panel (docs/specs/12, task 13.2) ---
+
+
+class Listener:
+    """Collects events from every thread, as the panel will."""
+
+    def __init__(self):
+        self.seen = []
+        self._lock = threading.Lock()
+
+    def __call__(self, event):
+        with self._lock:
+            self.seen.append(event)
+
+    def nodes(self) -> list[tuple[str, str]]:
+        return [
+            ("start" if isinstance(e, NodeStarted) else "finish", e.name)
+            for e in self.seen
+            if isinstance(e, NodeStarted | NodeFinished)
+        ]
+
+
+def test_listening_leaves_the_final_state_as_it_is(stocked, tmp_path):
+    quiet = go(pipeline(stocked, tmp_path / "a", FakeModel(), config=debating(1)))
+    heard = Listener()
+    graph = pipeline(stocked, tmp_path / "b", FakeModel(), config=debating(1), on_event=heard)
+    loud = go(graph)
+    assert dump_state(loud) == dump_state(quiet)
+    snapshot = graph.get_state({"configurable": {"thread_id": loud["meta"].run_id}})
+    assert dump_state(snapshot.values) == dump_state(quiet)
+
+
+def test_every_node_reports_its_start_and_finish_once(stocked, tmp_path):
+    heard = Listener()
+    go(pipeline(stocked, tmp_path, FakeModel(), config=debating(2), on_event=heard))
+    nodes = heard.nodes()
+    analysts = {"market_analyst", "news_analyst", "fundamentals_analyst"}
+    assert nodes[:2] == [("start", "prefetch"), ("finish", "prefetch")]
+    assert sorted(n for kind, n in nodes if n in analysts and kind == "start") == sorted(analysts)
+    assert sorted(n for kind, n in nodes if n in analysts and kind == "finish") == sorted(analysts)
+    assert [n for kind, n in nodes if kind == "finish" and n in ("bull", "bear")] == [
+        "bull", "bear", "bull", "bear",
+    ]  # fmt: skip
+    assert nodes[-2:] == [("start", "research_manager"), ("finish", "research_manager")]
+    finished = {e.name: e for e in heard.seen if isinstance(e, NodeFinished)}
+    assert "decision" in finished["research_manager"].update
+    assert not any(e.failed for e in finished.values())
+
+
+def test_llm_calls_say_which_node_asked(stocked, tmp_path):
+    heard = Listener()
+    go(pipeline(stocked, tmp_path, FakeModel(), on_event=heard))
+    calls = sorted(e.node for e in heard.seen if isinstance(e, LLMCalled))
+    assert calls == ["fundamentals_analyst", "market_analyst", "news_analyst", "research_manager"]
+    assert all(e.input_tokens == 100 and not e.cached for e in heard.seen if isinstance(e, LLMCalled))
+
+
+def test_a_resumed_run_reports_only_what_it_still_runs(stocked, tmp_path):
+    model = FakeModel(manager=[RuntimeError("power cut"), verdict("N1")])
+    first = Listener()
+    with pytest.raises(RuntimeError, match="power cut"):
+        go(pipeline(stocked, tmp_path, model, on_event=first))
+    assert first.nodes()[-1] == ("finish", "research_manager")
+    assert [e.failed for e in first.seen if isinstance(e, NodeFinished)][-1] is True
+
+    second = Listener()
+    state = go(pipeline(stocked, tmp_path, model, cache_name="fresh.db", on_event=second))
+    assert state["meta"].status == "ok"
+    assert second.nodes() == [("start", "research_manager"), ("finish", "research_manager")]
+
+
+def test_a_listener_that_breaks_does_not_stop_the_run(stocked, tmp_path, caplog):
+    def broken(event):
+        raise ValueError("display fault")
+
+    quiet = go(pipeline(stocked, tmp_path / "a", FakeModel()))
+    loud = go(pipeline(stocked, tmp_path / "b", FakeModel(), on_event=broken))
+    assert dump_state(loud) == dump_state(quiet)
+    assert "event callback failed" in caplog.text
+
+
+def test_without_a_listener_the_nodes_are_not_wrapped(stocked, tmp_path):
+    graph = pipeline(stocked, tmp_path, FakeModel())
+    node = graph.builder.nodes["research_manager"].runnable
+    assert getattr(node, "func", None).__name__ == "research_manager_node"
 
 
 # --- ad-hoc runs ---
